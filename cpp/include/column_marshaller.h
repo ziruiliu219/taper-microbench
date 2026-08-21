@@ -125,7 +125,25 @@ inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, s
     } else {
         memcpy(writePos + 1, &l32, 4);
     }
-    if (len) memcpy(writePos + 1 + rowLenSize, data, len);
+    // Copy string data — use fixed-size loads for typical key lengths (<=16 bytes)
+    if (len > 0) {
+        uint8_t* dst = writePos + 1 + rowLenSize;
+        if (__builtin_expect(len <= 8, 1)) {
+            // 1-8 bytes: load first 8 bytes (may over-read source, safe if source has >=8 accessible)
+            uint64_t v;
+            memcpy(&v, data, 8);
+            memcpy(dst, &v, 8);
+        } else if (__builtin_expect(len <= 16, 1)) {
+            // 9-16 bytes: two 8-byte copies
+            uint64_t v0, v1;
+            memcpy(&v0, data, 8);
+            memcpy(&v1, data + len - 8, 8);
+            memcpy(dst, &v0, 8);
+            memcpy(dst + len - 8, &v1, 8);
+        } else {
+            memcpy(dst, data, len);
+        }
+    }
     return 1 + rowLenSize + len;
 }
 
@@ -143,7 +161,7 @@ inline bool CompareVarcharFromRow(const uint8_t* rowData, const uint8_t* input, 
     if (stringLen!=inputLen) return false;
     if (stringLen==0) return true;
     const uint8_t* stored = rowData+1+rowLenSize;
-    return memcmp(stored, input, stringLen) == 0;
+    return InlineMemEqual(stored, input, stringLen);
 }
 
 // ─── SetRowPtr / GetRowPtr ────────────────────────────────────────────────────
