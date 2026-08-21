@@ -38,3 +38,7 @@ target_include_directories(cpp_micro_pipeline PRIVATE include ${xxhash_SOURCE_DI
 # 5. Standalone profile runner (full 4str_0int workload, no framework)
 add_executable(cpp_profile_taper src/profile_taper_standalone.cpp)
 target_include_directories(cpp_profile_taper PRIVATE include ${xxhash_SOURCE_DIR})
+
+# 6. Step-by-step: each function in the pipeline
+add_executable(cpp_step_by_step src/step_by_step_bench.cpp)
+target_include_directories(cpp_step_by_step PRIVATE include ${xxhash_SOURCE_DIR})
