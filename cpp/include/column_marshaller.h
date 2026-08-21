@@ -104,10 +104,7 @@ static TAPER_FORCE_INLINE bool InlineMemEqual(const uint8_t* a, const uint8_t* b
 
 inline uint8_t ComputeRowLenSize(size_t len) { return len<=0xFF?1:len<=0xFFFF?2:4; }
 
-/// Inline short-string copy — uses compiler builtin to force inline expansion.
-/// On aarch64 with clang, __builtin_memcpy with small constant-propagated sizes
-/// generates ldr/str pairs without bl memcpy@plt.
-/// For runtime-variable len, we just use memcpy (compiler may or may not inline).
+/// Inline short-string copy (unused, kept for reference).
 static TAPER_FORCE_INLINE void InlineMemCopy(uint8_t* __restrict dst, const uint8_t* __restrict src, size_t len) {
     memcpy(dst, src, len);
 }
@@ -115,7 +112,7 @@ static TAPER_FORCE_INLINE void InlineMemCopy(uint8_t* __restrict dst, const uint
 inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, size_t len) {
     uint8_t rowLenSize = ComputeRowLenSize(len);
     *writePos = rowLenSize;
-    // Store length inline — avoid memcpy for 1-4 byte store
+    // Store length — direct store avoids memcpy call for 1-byte case
     uint32_t l32 = static_cast<uint32_t>(len);
     if (rowLenSize == 1) {
         *(writePos + 1) = static_cast<uint8_t>(l32);
@@ -125,24 +122,9 @@ inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, s
     } else {
         memcpy(writePos + 1, &l32, 4);
     }
-    // Copy string data — use fixed-size loads for typical key lengths (<=16 bytes)
+    // Copy string data
     if (len > 0) {
-        uint8_t* dst = writePos + 1 + rowLenSize;
-        if (__builtin_expect(len <= 8, 1)) {
-            // 1-8 bytes: load first 8 bytes (may over-read source, safe if source has >=8 accessible)
-            uint64_t v;
-            memcpy(&v, data, 8);
-            memcpy(dst, &v, 8);
-        } else if (__builtin_expect(len <= 16, 1)) {
-            // 9-16 bytes: two 8-byte copies
-            uint64_t v0, v1;
-            memcpy(&v0, data, 8);
-            memcpy(&v1, data + len - 8, 8);
-            memcpy(dst, &v0, 8);
-            memcpy(dst + len - 8, &v1, 8);
-        } else {
-            memcpy(dst, data, len);
-        }
+        memcpy(writePos + 1 + rowLenSize, data, len);
     }
     return 1 + rowLenSize + len;
 }
@@ -357,14 +339,17 @@ private:
 
     TAPER_FORCE_INLINE void StoreKeyOneRow(char* row, int32_t rowIdx, const ColumnInput* cols) {
         if (useMerged_) {
+            const int32_t numVarchar = static_cast<int32_t>(varcharColIndices_.size());
             size_t totalSize = 0;
-            for (int32_t v = 0; v < static_cast<int32_t>(varcharColIndices_.size()); v++) {
+            #pragma clang loop unroll(full)
+            for (int32_t v = 0; v < numVarchar; v++) {
                 int32_t ci = varcharColIndices_[v];
                 totalSize += 1 + ComputeRowLenSize(cols[ci].vcSlices[rowIdx].len) + cols[ci].vcSlices[rowIdx].len;
             }
             uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
             uint8_t* wp = blockStart;
-            for (int32_t v = 0; v < static_cast<int32_t>(varcharColIndices_.size()); v++) {
+            #pragma clang loop unroll(full)
+            for (int32_t v = 0; v < numVarchar; v++) {
                 int32_t ci = varcharColIndices_[v];
                 RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
                 wp += SerializeVarcharToBuffer(wp, cols[ci].vcSlices[rowIdx].ptr, cols[ci].vcSlices[rowIdx].len);
@@ -483,6 +468,7 @@ private:
         memcpy(&blockPtr, row + varcharSlotOffset_, sizeof(blockPtr));
         if (!blockPtr) { memset(outPtrs, 0, maxCount * sizeof(uint8_t*)); return; }
         const uint8_t* pos = blockPtr;
+        #pragma clang loop unroll(full)
         for (int32_t i = 0; i < maxCount; i++) {
             int32_t ci = varcharColIndices_[i];
             if (RowContainer::IsNullAt(row, colNullBytes_[ci], colNullMasks_[ci])) {
@@ -497,6 +483,7 @@ private:
         const std::vector<ColumnInput>& columns) const
     {
         const char* row = reinterpret_cast<const char*>(rowPtr);
+        #pragma clang loop unroll(full)
         for (int32_t colIdx = 0; colIdx < groupColNum_; colIdx++) {
             if (colDescs_[colIdx] == ColumnDesc::Int64) {
                 if (RowContainer::ReadValue<int64_t>(row, colOffsets_[colIdx]) != columns[colIdx].int64Data[rowIdx])
