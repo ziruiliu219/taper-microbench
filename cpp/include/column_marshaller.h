@@ -113,10 +113,20 @@ static TAPER_FORCE_INLINE void InlineMemCopy(uint8_t* __restrict dst, const uint
 }
 
 inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, size_t len) {
-    uint8_t rowLenSize = ComputeRowLenSize(len); *writePos = rowLenSize;
-    uint32_t l32 = static_cast<uint32_t>(len); memcpy(writePos+1, &l32, rowLenSize);
-    if (len) memcpy(writePos+1+rowLenSize, data, len);
-    return 1+rowLenSize+len;
+    uint8_t rowLenSize = ComputeRowLenSize(len);
+    *writePos = rowLenSize;
+    // Store length inline — avoid memcpy for 1-4 byte store
+    uint32_t l32 = static_cast<uint32_t>(len);
+    if (rowLenSize == 1) {
+        *(writePos + 1) = static_cast<uint8_t>(l32);
+    } else if (rowLenSize == 2) {
+        uint16_t l16 = static_cast<uint16_t>(l32);
+        memcpy(writePos + 1, &l16, 2);
+    } else {
+        memcpy(writePos + 1, &l32, 4);
+    }
+    if (len) memcpy(writePos + 1 + rowLenSize, data, len);
+    return 1 + rowLenSize + len;
 }
 
 inline size_t ComputeVarCharSerializedSize(const uint8_t* data) {
