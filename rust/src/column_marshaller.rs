@@ -38,16 +38,25 @@ pub fn compute_row_len_size(string_len: usize) -> u8 {
 
 /// Serialize a non-null VARCHAR value into a buffer. Returns bytes written.
 /// Mirrors C++ `TaperColumnSerializeHandler::SerializeVarcharToBuffer`.
+/// Uses libc::memcpy to match C++ codegen exactly (bl memcpy@plt).
 #[inline(never)]
 pub fn serialize_varchar_to_buffer(write_pos: *mut u8, data: &[u8]) -> usize {
     let string_len = data.len();
     let row_len_size = compute_row_len_size(string_len);
     unsafe {
         *write_pos = row_len_size;
-        let len_bytes = (string_len as u32).to_le_bytes();
-        std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), write_pos.add(1), row_len_size as usize);
+        let l32 = string_len as u32;
+        libc::memcpy(
+            write_pos.add(1) as *mut libc::c_void,
+            &l32 as *const u32 as *const libc::c_void,
+            row_len_size as usize,
+        );
         if string_len > 0 {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), write_pos.add(1 + row_len_size as usize), string_len);
+            libc::memcpy(
+                write_pos.add(1 + row_len_size as usize) as *mut libc::c_void,
+                data.as_ptr() as *const libc::c_void,
+                string_len,
+            );
         }
     }
     1 + row_len_size as usize + string_len
@@ -95,8 +104,12 @@ pub fn compare_varchar_from_row(arena_ptr: *const u8, input: &[u8]) -> bool {
         if string_len != input.len() { return false; }
         if string_len == 0 { return true; }
         let data_ptr = arena_ptr.add(1 + row_len_size as usize);
-        // mirrors: return memcmp(rowDataPtr, sv.data(), stringLen) == 0;
-        std::slice::from_raw_parts(data_ptr, string_len) == input
+        // Use libc::memcmp to match C++ codegen exactly (bl memcmp@plt)
+        libc::memcmp(
+            data_ptr as *const libc::c_void,
+            input.as_ptr() as *const libc::c_void,
+            string_len,
+        ) == 0
     }
 }
 
