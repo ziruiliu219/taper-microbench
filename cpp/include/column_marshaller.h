@@ -104,51 +104,18 @@ static TAPER_FORCE_INLINE bool InlineMemEqual(const uint8_t* a, const uint8_t* b
 
 inline uint8_t ComputeRowLenSize(size_t len) { return len<=0xFF?1:len<=0xFFFF?2:4; }
 
-/// Inline short-string copy to avoid `bl memcpy@plt` overhead on aarch64.
-/// Key strings are typically 8–20 bytes; this eliminates the function call.
-static TAPER_FORCE_INLINE void InlineMemCopy(uint8_t* dst, const uint8_t* src, size_t len) {
-    if (len == 0) return;
-    if (len <= 8) {
-        if (len >= 4) {
-            uint32_t a, b;
-            memcpy(&a, src, 4);
-            memcpy(&b, src + len - 4, 4);
-            memcpy(dst, &a, 4);
-            memcpy(dst + len - 4, &b, 4);
-        } else {
-            dst[0] = src[0];
-            if (len > 1) dst[len >> 1] = src[len >> 1];
-            if (len > 1) dst[len - 1] = src[len - 1];
-        }
-        return;
-    }
-    if (len <= 16) {
-        uint64_t a, b;
-        memcpy(&a, src, 8);
-        memcpy(&b, src + len - 8, 8);
-        memcpy(dst, &a, 8);
-        memcpy(dst + len - 8, &b, 8);
-        return;
-    }
-    if (len <= 32) {
-        uint64_t a, b, c, d;
-        memcpy(&a, src, 8);
-        memcpy(&b, src + 8, 8);
-        memcpy(&c, src + len - 16, 8);
-        memcpy(&d, src + len - 8, 8);
-        memcpy(dst, &a, 8);
-        memcpy(dst + 8, &b, 8);
-        memcpy(dst + len - 16, &c, 8);
-        memcpy(dst + len - 8, &d, 8);
-        return;
-    }
+/// Inline short-string copy — uses compiler builtin to force inline expansion.
+/// On aarch64 with clang, __builtin_memcpy with small constant-propagated sizes
+/// generates ldr/str pairs without bl memcpy@plt.
+/// For runtime-variable len, we just use memcpy (compiler may or may not inline).
+static TAPER_FORCE_INLINE void InlineMemCopy(uint8_t* __restrict dst, const uint8_t* __restrict src, size_t len) {
     memcpy(dst, src, len);
 }
 
 inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, size_t len) {
     uint8_t rowLenSize = ComputeRowLenSize(len); *writePos = rowLenSize;
     uint32_t l32 = static_cast<uint32_t>(len); memcpy(writePos+1, &l32, rowLenSize);
-    if (len) InlineMemCopy(writePos+1+rowLenSize, data, len);
+    if (len) memcpy(writePos+1+rowLenSize, data, len);
     return 1+rowLenSize+len;
 }
 
@@ -166,7 +133,7 @@ inline bool CompareVarcharFromRow(const uint8_t* rowData, const uint8_t* input, 
     if (stringLen!=inputLen) return false;
     if (stringLen==0) return true;
     const uint8_t* stored = rowData+1+rowLenSize;
-    return InlineMemEqual(stored, input, stringLen);
+    return memcmp(stored, input, stringLen) == 0;
 }
 
 // ─── SetRowPtr / GetRowPtr ────────────────────────────────────────────────────
