@@ -38,7 +38,7 @@ pub fn compute_row_len_size(string_len: usize) -> u8 {
 
 /// Serialize a non-null VARCHAR value into a buffer. Returns bytes written.
 /// Mirrors C++ `TaperColumnSerializeHandler::SerializeVarcharToBuffer`.
-#[inline]
+#[inline(never)]
 pub fn serialize_varchar_to_buffer(write_pos: *mut u8, data: &[u8]) -> usize {
     let string_len = data.len();
     let row_len_size = compute_row_len_size(string_len);
@@ -82,7 +82,7 @@ pub fn compute_varchar_serialized_size(data: *const u8) -> usize {
 /// Mirrors C++ `TaperColumnSerializeHandler::CompareVarcharFromRow`:
 ///   return memcmp(rowDataPtr, sv.data(), stringLen) == 0;
 /// Uses slice equality which compiles to memcmp — identical to OmniOperator.
-#[inline]
+#[inline(never)]
 pub fn compare_varchar_from_row(arena_ptr: *const u8, input: &[u8]) -> bool {
     unsafe {
         let row_len_size = *arena_ptr;
