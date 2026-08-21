@@ -127,7 +127,7 @@ static uint64_t BenchNewRow(const TestData& d) {
 }
 
 // 7. StoreKeyOneRow (serialize 4 varchar to arena)
-__attribute__((noinline))
+__attribute__((noinline, flatten))
 static uint64_t BenchSerialize(const TestData& d) {
     taper::SimpleArenaAllocator pool;
     uint64_t checksum = 0;
@@ -165,7 +165,7 @@ static uint64_t BenchStoreValue(const TestData& d) {
 }
 
 // 10. BatchCompareVarchar (compare 4 cols, all equal)
-__attribute__((noinline))
+__attribute__((noinline, flatten))
 static uint64_t BenchCompareVarchar(const TestData& d) {
     // Pre-serialize all rows
     taper::SimpleArenaAllocator pool;
@@ -221,7 +221,7 @@ static uint64_t BenchAccumulate(const TestData& d) {
 }
 
 // Full pipeline (for comparison)
-__attribute__((noinline))
+__attribute__((noinline, flatten))
 static uint64_t BenchFullPipeline(const TestData& d) {
     taper::SimpleArenaAllocator pool;
     std::vector<taper::ColumnDesc> cd(NUM_STR_COLS, taper::ColumnDesc::Varchar);
