@@ -220,9 +220,11 @@ pub fn store_key_one_row_from_decode(
     // Store varchar columns — matches C++ StoreKeyOneRowFromDecode:
     // directly iterates varcharColIndices and serializes inline, no temporary array.
     if use_merged && !varchar_col_indices.is_empty() {
+        let num_vc = std::hint::black_box(varchar_col_indices.len());
         // Compute total size
         let mut total_size = 0usize;
-        for &vc_idx in varchar_col_indices.iter() {
+        for i in 0..num_vc {
+            let vc_idx = varchar_col_indices[i];
             let data = match &columns[vc_idx] { ColumnInput::Varchar(v) => v[row_idx], _ => panic!("") };
             total_size += 1 + compute_row_len_size(data.len()) as usize + data.len();
         }
@@ -230,7 +232,8 @@ pub fn store_key_one_row_from_decode(
         let block_start = rc.arena_alloc(total_size);
         let mut write_pos = block_start;
         // Serialize each column directly (no Vec allocation)
-        for &vc_idx in varchar_col_indices.iter() {
+        for i in 0..num_vc {
+            let vc_idx = varchar_col_indices[i];
             let col = rc.column_at(vc_idx);
             let data = match &columns[vc_idx] { ColumnInput::Varchar(v) => v[row_idx], _ => panic!("") };
             RowContainer::clear_null_at(row, col.null_byte(), col.null_mask());
@@ -299,8 +302,9 @@ pub fn compare_keys_with_decode(
     row_ptr: *const u8, row_idx: usize, columns: &[ColumnInput],
     col_descs: &[ColumnDesc], col_offsets: &[usize],
 ) -> bool {
-    for (col_idx, desc) in col_descs.iter().enumerate() {
-        match desc {
+    let num_cols = std::hint::black_box(col_descs.len());
+    for col_idx in 0..num_cols {
+        match &col_descs[col_idx] {
             ColumnDesc::Int64 => {
                 let stored: i64 = RowContainer::read_value::<i64>(row_ptr, col_offsets[col_idx]);
                 let input = match &columns[col_idx] { ColumnInput::Int64(v) => v[row_idx], _ => panic!("") };
