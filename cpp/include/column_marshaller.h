@@ -340,21 +340,44 @@ private:
     TAPER_FORCE_INLINE void StoreKeyOneRow(char* row, int32_t rowIdx, const ColumnInput* cols) {
         if (useMerged_) {
             const int32_t numVarchar = static_cast<int32_t>(varcharColIndices_.size());
-            size_t totalSize = 0;
-            #pragma clang loop unroll(full)
-            for (int32_t v = 0; v < numVarchar; v++) {
-                int32_t ci = varcharColIndices_[v];
-                totalSize += 1 + ComputeRowLenSize(cols[ci].vcSlices[rowIdx].len) + cols[ci].vcSlices[rowIdx].len;
+            // Manual unroll for 4 varchar columns (common case)
+            if (numVarchar == 4) {
+                int32_t ci0 = varcharColIndices_[0], ci1 = varcharColIndices_[1];
+                int32_t ci2 = varcharColIndices_[2], ci3 = varcharColIndices_[3];
+                size_t len0 = cols[ci0].vcSlices[rowIdx].len;
+                size_t len1 = cols[ci1].vcSlices[rowIdx].len;
+                size_t len2 = cols[ci2].vcSlices[rowIdx].len;
+                size_t len3 = cols[ci3].vcSlices[rowIdx].len;
+                size_t totalSize = (1 + ComputeRowLenSize(len0) + len0)
+                                 + (1 + ComputeRowLenSize(len1) + len1)
+                                 + (1 + ComputeRowLenSize(len2) + len2)
+                                 + (1 + ComputeRowLenSize(len3) + len3);
+                uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
+                uint8_t* wp = blockStart;
+                RowContainer::ClearNullAt(row, colNullBytes_[ci0], colNullMasks_[ci0]);
+                wp += SerializeVarcharToBuffer(wp, cols[ci0].vcSlices[rowIdx].ptr, len0);
+                RowContainer::ClearNullAt(row, colNullBytes_[ci1], colNullMasks_[ci1]);
+                wp += SerializeVarcharToBuffer(wp, cols[ci1].vcSlices[rowIdx].ptr, len1);
+                RowContainer::ClearNullAt(row, colNullBytes_[ci2], colNullMasks_[ci2]);
+                wp += SerializeVarcharToBuffer(wp, cols[ci2].vcSlices[rowIdx].ptr, len2);
+                RowContainer::ClearNullAt(row, colNullBytes_[ci3], colNullMasks_[ci3]);
+                wp += SerializeVarcharToBuffer(wp, cols[ci3].vcSlices[rowIdx].ptr, len3);
+                memcpy(row + varcharSlotOffset_, &blockStart, sizeof(blockStart));
+            } else {
+                size_t totalSize = 0;
+                for (int32_t v = 0; v < numVarchar; v++) {
+                    int32_t ci = varcharColIndices_[v];
+                    totalSize += 1 + ComputeRowLenSize(cols[ci].vcSlices[rowIdx].len) + cols[ci].vcSlices[rowIdx].len;
+                }
+                uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
+                uint8_t* wp = blockStart;
+                for (int32_t v = 0; v < numVarchar; v++) {
+                    int32_t ci = varcharColIndices_[v];
+                    RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
+                    wp += SerializeVarcharToBuffer(wp, cols[ci].vcSlices[rowIdx].ptr, cols[ci].vcSlices[rowIdx].len);
+                }
+                memcpy(row + varcharSlotOffset_, &blockStart, sizeof(blockStart));
             }
-            uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
-            uint8_t* wp = blockStart;
-            #pragma clang loop unroll(full)
-            for (int32_t v = 0; v < numVarchar; v++) {
-                int32_t ci = varcharColIndices_[v];
-                RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
-                wp += SerializeVarcharToBuffer(wp, cols[ci].vcSlices[rowIdx].ptr, cols[ci].vcSlices[rowIdx].len);
-            }
-            memcpy(row + varcharSlotOffset_, &blockStart, sizeof(blockStart));
         } else if (!varcharColIndices_.empty()) {
             int32_t ci = varcharColIndices_[0];
             RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
