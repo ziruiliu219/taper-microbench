@@ -161,16 +161,17 @@ fn bench_serialize_key(d: &TestData) -> u64 {
     let ks = vec![0usize; 4];
     let kinds = vec![ColumnKind::Varchar; 4];
     let mut rc = RowContainer::with_kinds(&ks, &kinds, 8);
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut checksum: u64 = 0;
     for i in 0..d.total_rows {
         let mut total_size = 0usize;
-        for c in 0..NUM_STR_COLS {
+        for c in 0..num_cols {
             let s = &d.str_cols[c][i];
             total_size += 1 + compute_row_len_size(s.len()) as usize + s.len();
         }
         let block = rc.arena_alloc(total_size);
         let mut wp = block;
-        for c in 0..NUM_STR_COLS {
+        for c in 0..num_cols {
             let s = &d.str_cols[c][i];
             let written = serialize_varchar_to_buffer(wp, s.as_slice());
             wp = unsafe { wp.add(written) };
@@ -201,16 +202,17 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
     let ks = vec![0usize; 4];
     let kinds = vec![ColumnKind::Varchar; 4];
     let mut rc = RowContainer::with_kinds(&ks, &kinds, 8);
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut blocks: Vec<*const u8> = Vec::with_capacity(d.total_rows);
     for i in 0..d.total_rows {
         let mut total_size = 0usize;
-        for c in 0..NUM_STR_COLS {
+        for c in 0..num_cols {
             let s = &d.str_cols[c][i];
             total_size += 1 + compute_row_len_size(s.len()) as usize + s.len();
         }
         let block = rc.arena_alloc(total_size);
         let mut wp = block;
-        for c in 0..NUM_STR_COLS {
+        for c in 0..num_cols {
             let s = &d.str_cols[c][i];
             let written = serialize_varchar_to_buffer(wp, s.as_slice());
             wp = unsafe { wp.add(written) };
@@ -221,7 +223,7 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
     for i in 0..d.total_rows {
         let mut pos = blocks[i];
         let mut ok = true;
-        for c in 0..NUM_STR_COLS {
+        for c in 0..num_cols {
             let s = &d.str_cols[c][i];
             if !compare_varchar_from_row(pos, s.as_slice()) { ok = false; break; }
             let entry_size = compute_varchar_serialized_size(pos);
