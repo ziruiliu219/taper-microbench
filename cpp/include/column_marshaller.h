@@ -125,7 +125,20 @@ inline bool CompareVarcharFromRow(const uint8_t* rowData, const uint8_t* input, 
     if (stringLen!=inputLen) return false;
     if (stringLen==0) return true;
     const uint8_t* stored = rowData+1+rowLenSize;
-    return memcmp(stored, input, stringLen) == 0;
+    // Inline comparison for short strings (typical key_NN_cN is 8-14 bytes)
+    size_t pos = 0;
+    while (pos + 8 <= stringLen) {
+        uint64_t a, b;
+        memcpy(&a, stored + pos, 8);
+        memcpy(&b, input + pos, 8);
+        if (a != b) return false;
+        pos += 8;
+    }
+    while (pos < stringLen) {
+        if (stored[pos] != input[pos]) return false;
+        pos++;
+    }
+    return true;
 }
 
 // ─── SetRowPtr / GetRowPtr ────────────────────────────────────────────────────
@@ -237,6 +250,7 @@ public:
         return sum;
     }
 
+    __attribute__((flatten))
     void EmplaceTableWithDecode(const int64_t* hashes, int32_t rowsNum,
         const std::vector<ColumnInput>& columns, const int64_t* aggValues)
     {

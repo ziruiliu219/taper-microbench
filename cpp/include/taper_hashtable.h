@@ -105,6 +105,7 @@ public:
     // ─── EmplaceBatch ───────────────────────────────────────────────
 
     template <typename Filter, typename FInit, typename FUpdate>
+    __attribute__((flatten))
     void EmplaceBatch(const Key* keys, int32_t numRows, Filter&& filter, FInit&& fInit, FUpdate&& fUpdate) {
         if (Capacity() < static_cast<size_t>(numRows)) {
             EmplaceBatchDirectly(keys, numRows, std::forward<Filter>(filter),
@@ -220,7 +221,7 @@ private:
     bool ShouldExpand() const { return size_ >= expandThreshold_; }
 
     template <typename FInit, typename FUpdate>
-    bool TryEmplaceAtPos(Key key, uint64_t hashVal, ChunkPos chunkPos, FInit&& fInit, FUpdate&& fUpdate) {
+    inline __attribute__((always_inline)) bool TryEmplaceAtPos(Key key, uint64_t hashVal, ChunkPos chunkPos, FInit&& fInit, FUpdate&& fUpdate) {
         auto* chunk = chunks_ + chunkPos;
         uint8_t tagHash = (hashVal >> 16) & 0x7F;
         auto tags = chunk->TagsU64();
