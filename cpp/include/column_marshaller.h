@@ -110,23 +110,10 @@ static TAPER_FORCE_INLINE void InlineMemCopy(uint8_t* __restrict dst, const uint
 }
 
 inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, size_t len) {
-    uint8_t rowLenSize = ComputeRowLenSize(len);
-    *writePos = rowLenSize;
-    // Store length — direct store avoids memcpy call for 1-byte case
-    uint32_t l32 = static_cast<uint32_t>(len);
-    if (rowLenSize == 1) {
-        *(writePos + 1) = static_cast<uint8_t>(l32);
-    } else if (rowLenSize == 2) {
-        uint16_t l16 = static_cast<uint16_t>(l32);
-        memcpy(writePos + 1, &l16, 2);
-    } else {
-        memcpy(writePos + 1, &l32, 4);
-    }
-    // Copy string data
-    if (len > 0) {
-        memcpy(writePos + 1 + rowLenSize, data, len);
-    }
-    return 1 + rowLenSize + len;
+    uint8_t rowLenSize = ComputeRowLenSize(len); *writePos = rowLenSize;
+    uint32_t l32 = static_cast<uint32_t>(len); memcpy(writePos+1, &l32, rowLenSize);
+    if (len) memcpy(writePos+1+rowLenSize, data, len);
+    return 1+rowLenSize+len;
 }
 
 inline size_t ComputeVarCharSerializedSize(const uint8_t* data) {
@@ -143,7 +130,7 @@ inline bool CompareVarcharFromRow(const uint8_t* rowData, const uint8_t* input, 
     if (stringLen!=inputLen) return false;
     if (stringLen==0) return true;
     const uint8_t* stored = rowData+1+rowLenSize;
-    return InlineMemEqual(stored, input, stringLen);
+    return memcmp(stored, input, stringLen) == 0;
 }
 
 // ─── SetRowPtr / GetRowPtr ────────────────────────────────────────────────────
@@ -255,7 +242,6 @@ public:
         return sum;
     }
 
-    __attribute__((flatten))
     void EmplaceTableWithDecode(const int64_t* hashes, int32_t rowsNum,
         const std::vector<ColumnInput>& columns, const int64_t* aggValues)
     {
@@ -339,45 +325,19 @@ private:
 
     TAPER_FORCE_INLINE void StoreKeyOneRow(char* row, int32_t rowIdx, const ColumnInput* cols) {
         if (useMerged_) {
-            const int32_t numVarchar = static_cast<int32_t>(varcharColIndices_.size());
-            // Manual unroll for 4 varchar columns (common case)
-            if (numVarchar == 4) {
-                int32_t ci0 = varcharColIndices_[0], ci1 = varcharColIndices_[1];
-                int32_t ci2 = varcharColIndices_[2], ci3 = varcharColIndices_[3];
-                size_t len0 = cols[ci0].vcSlices[rowIdx].len;
-                size_t len1 = cols[ci1].vcSlices[rowIdx].len;
-                size_t len2 = cols[ci2].vcSlices[rowIdx].len;
-                size_t len3 = cols[ci3].vcSlices[rowIdx].len;
-                size_t totalSize = (1 + ComputeRowLenSize(len0) + len0)
-                                 + (1 + ComputeRowLenSize(len1) + len1)
-                                 + (1 + ComputeRowLenSize(len2) + len2)
-                                 + (1 + ComputeRowLenSize(len3) + len3);
-                uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
-                uint8_t* wp = blockStart;
-                RowContainer::ClearNullAt(row, colNullBytes_[ci0], colNullMasks_[ci0]);
-                wp += SerializeVarcharToBuffer(wp, cols[ci0].vcSlices[rowIdx].ptr, len0);
-                RowContainer::ClearNullAt(row, colNullBytes_[ci1], colNullMasks_[ci1]);
-                wp += SerializeVarcharToBuffer(wp, cols[ci1].vcSlices[rowIdx].ptr, len1);
-                RowContainer::ClearNullAt(row, colNullBytes_[ci2], colNullMasks_[ci2]);
-                wp += SerializeVarcharToBuffer(wp, cols[ci2].vcSlices[rowIdx].ptr, len2);
-                RowContainer::ClearNullAt(row, colNullBytes_[ci3], colNullMasks_[ci3]);
-                wp += SerializeVarcharToBuffer(wp, cols[ci3].vcSlices[rowIdx].ptr, len3);
-                memcpy(row + varcharSlotOffset_, &blockStart, sizeof(blockStart));
-            } else {
-                size_t totalSize = 0;
-                for (int32_t v = 0; v < numVarchar; v++) {
-                    int32_t ci = varcharColIndices_[v];
-                    totalSize += 1 + ComputeRowLenSize(cols[ci].vcSlices[rowIdx].len) + cols[ci].vcSlices[rowIdx].len;
-                }
-                uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
-                uint8_t* wp = blockStart;
-                for (int32_t v = 0; v < numVarchar; v++) {
-                    int32_t ci = varcharColIndices_[v];
-                    RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
-                    wp += SerializeVarcharToBuffer(wp, cols[ci].vcSlices[rowIdx].ptr, cols[ci].vcSlices[rowIdx].len);
-                }
-                memcpy(row + varcharSlotOffset_, &blockStart, sizeof(blockStart));
+            size_t totalSize = 0;
+            for (int32_t v = 0; v < static_cast<int32_t>(varcharColIndices_.size()); v++) {
+                int32_t ci = varcharColIndices_[v];
+                totalSize += 1 + ComputeRowLenSize(cols[ci].vcSlices[rowIdx].len) + cols[ci].vcSlices[rowIdx].len;
             }
+            uint8_t* blockStart = aggRows_.ArenaAlloc(totalSize);
+            uint8_t* wp = blockStart;
+            for (int32_t v = 0; v < static_cast<int32_t>(varcharColIndices_.size()); v++) {
+                int32_t ci = varcharColIndices_[v];
+                RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
+                wp += SerializeVarcharToBuffer(wp, cols[ci].vcSlices[rowIdx].ptr, cols[ci].vcSlices[rowIdx].len);
+            }
+            memcpy(row + varcharSlotOffset_, &blockStart, sizeof(blockStart));
         } else if (!varcharColIndices_.empty()) {
             int32_t ci = varcharColIndices_[0];
             RowContainer::ClearNullAt(row, colNullBytes_[ci], colNullMasks_[ci]);
@@ -491,7 +451,6 @@ private:
         memcpy(&blockPtr, row + varcharSlotOffset_, sizeof(blockPtr));
         if (!blockPtr) { memset(outPtrs, 0, maxCount * sizeof(uint8_t*)); return; }
         const uint8_t* pos = blockPtr;
-        #pragma clang loop unroll(full)
         for (int32_t i = 0; i < maxCount; i++) {
             int32_t ci = varcharColIndices_[i];
             if (RowContainer::IsNullAt(row, colNullBytes_[ci], colNullMasks_[ci])) {
@@ -506,7 +465,6 @@ private:
         const std::vector<ColumnInput>& columns) const
     {
         const char* row = reinterpret_cast<const char*>(rowPtr);
-        #pragma clang loop unroll(full)
         for (int32_t colIdx = 0; colIdx < groupColNum_; colIdx++) {
             if (colDescs_[colIdx] == ColumnDesc::Int64) {
                 if (RowContainer::ReadValue<int64_t>(row, colOffsets_[colIdx]) != columns[colIdx].int64Data[rowIdx])
