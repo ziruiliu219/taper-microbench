@@ -14,8 +14,6 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 use rand_mt::Mt19937GenRand64;
 
 const NUM_STR_COLS: usize = 4;
-const HT_SIZE: usize = 16384;
-const LOAD_FACTOR: f64 = 0.50;
 const NUM_PROBE_ROWS: usize = 1_000_000;
 const BATCH_SIZE: usize = 410;
 const SEED: u64 = 42;
@@ -33,8 +31,8 @@ struct TestData {
     num_chunks: usize,
 }
 
-fn gen_data(sel: f64) -> TestData {
-    let num_keys = (HT_SIZE as f64 * LOAD_FACTOR) as usize;
+fn gen_data(sel: f64, ht_size: usize, load_factor: f64) -> TestData {
+    let num_keys = (ht_size as f64 * load_factor) as usize;
     let mut rng = Mt19937GenRand64::new(SEED);
     let mut str_cols: Vec<Vec<Vec<u8>>> = (0..NUM_STR_COLS)
         .map(|c| (0..num_keys).map(|i| gen_string("key", i, c)).collect()).collect();
@@ -217,15 +215,18 @@ fn bench_full_pipeline(d: &TestData) -> u64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Usage: ./step_by_step_bench <sel> [iters] [ht_size] [load_factor]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let sel: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.1);
     let num_iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_ITERS);
+    let ht_size: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16384);
+    let load_factor: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.5);
 
     eprintln!("=== Rust Step-by-Step Bench ===");
-    eprintln!("sel={:.1}, iters={}", sel, num_iters);
+    eprintln!("sel={:.2}, iters={}, ht={}, lf={:.2}", sel, num_iters, ht_size, load_factor);
     eprintln!("Generating data...");
-    let data = gen_data(sel);
+    let data = gen_data(sel, ht_size, load_factor);
     eprintln!("totalRows={}, numKeys={}, numChunks={}\n", data.total_rows, data.num_keys, data.num_chunks);
 
     let bench = |name: &str, f: fn(&TestData) -> u64| {
@@ -237,7 +238,7 @@ fn main() {
         println!("{:<30}  {:7.2} ms  checksum={}", name, per_iter, checksum);
     };
 
-    println!("=== Rust Step-by-Step (sel={:.1}, {} iters, {} rows) ===", sel, num_iters, data.total_rows);
+    println!("=== Rust Step-by-Step (ht={}, lf={:.2}, sel={:.2}, {} iters, {} rows) ===", ht_size, load_factor, sel, num_iters, data.total_rows);
     bench("1. precompute_positions", bench_precompute_positions);
     bench("5. new_row", bench_new_row);
     bench("7. serialize_4str", bench_serialize);

@@ -20,8 +20,8 @@
 #include "column_marshaller.h"
 
 static constexpr size_t NUM_STR_COLS = 4;
-static constexpr size_t HT_SIZE = 16384;
-static constexpr double LOAD_FACTOR = 0.50;
+static size_t G_HT_SIZE = 16384;
+static double G_LOAD_FACTOR = 0.50;
 static constexpr size_t NUM_PROBE_ROWS = 1000000;
 static constexpr size_t BATCH_SIZE = 410;
 static constexpr uint64_t SEED = 42;
@@ -48,7 +48,7 @@ struct TestData {
 };
 
 static TestData GenData(double sel) {
-    size_t numKeys = static_cast<size_t>(HT_SIZE * LOAD_FACTOR);
+    size_t numKeys = static_cast<size_t>(G_HT_SIZE * G_LOAD_FACTOR);
     std::mt19937_64 rng(SEED);
     TestData d;
     d.numKeys = numKeys;
@@ -252,14 +252,17 @@ static uint64_t BenchFullPipeline(const TestData& d) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Usage: ./cpp_step_by_step <sel> [iters] [ht_size] [load_factor]
 int main(int argc, char** argv) {
     double sel = 0.1;
     size_t numIters = DEFAULT_ITERS;
     if (argc > 1) sel = std::atof(argv[1]);
     if (argc > 2) numIters = static_cast<size_t>(std::atoi(argv[2]));
+    if (argc > 3) G_HT_SIZE = static_cast<size_t>(std::atoi(argv[3]));
+    if (argc > 4) G_LOAD_FACTOR = std::atof(argv[4]);
 
     fprintf(stderr, "=== C++ Step-by-Step Bench ===\n");
-    fprintf(stderr, "sel=%.1f, iters=%zu\n", sel, numIters);
+    fprintf(stderr, "sel=%.2f, iters=%zu, ht=%zu, lf=%.2f\n", sel, numIters, G_HT_SIZE, G_LOAD_FACTOR);
     fprintf(stderr, "Generating data...\n");
     TestData data = GenData(sel);
     fprintf(stderr, "totalRows=%zu, numKeys=%zu, numChunks=%zu\n\n", data.totalRows, data.numKeys, data.numChunks);
@@ -274,7 +277,7 @@ int main(int argc, char** argv) {
         printf("%-30s  %7.2f ms  checksum=%lu\n", name, per_iter, (unsigned long)checksum);
     };
 
-    printf("=== C++ Step-by-Step (sel=%.1f, %zu iters, %zu rows) ===\n", sel, numIters, data.totalRows);
+    printf("=== C++ Step-by-Step (ht=%zu, lf=%.2f, sel=%.2f, %zu iters, %zu rows) ===\n", G_HT_SIZE, G_LOAD_FACTOR, sel, numIters, data.totalRows);
     bench("1. precompute_positions", BenchPrecomputePositions);
     bench("5. new_row", BenchNewRow);
     bench("7. serialize_4str", BenchSerialize);
