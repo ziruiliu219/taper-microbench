@@ -1,0 +1,11 @@
+[package]
+name = "serialize-demo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rust_serialize_demo"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
