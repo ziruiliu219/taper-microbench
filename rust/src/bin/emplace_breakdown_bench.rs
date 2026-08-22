@@ -12,7 +12,7 @@ use taper_hashmap::column_marshaller::{
 use taper_hashmap::row_container::{RowContainer, ColumnKind};
 use taper_hashmap::taper_hashmap::TaperHashMap;
 use taper_hashmap::bitmask::BitMask;
-use taper_hashmap::chunk::Chunk;
+use taper_hashmap::chunk::{Chunk, SlotValue};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 use rand_mt::Mt19937GenRand64;
 
@@ -215,91 +215,48 @@ fn bench_new_row(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_serialize_key(d: &TestData) -> u64 {
-    // SimpleArenaAllocator — exact replica of C++ taper::SimpleArenaAllocator (OmniOperator)
-    // All 11 member variables preserved to match struct size and codegen behavior.
-    struct SimpleArenaAllocator {
-        min_chunk_size: i64,
-        total_bytes: u64,
-        used_bytes: u64,
-        avail_bytes: u64,
-        avail_buf: *mut u8,
-        continuous_used_memory_bytes: u64,
-        continuous_used: bool,
-        growth_factor: u32,
-        linear_growth_threshold: i64,
-        chunks: Vec<*mut u8>,
-        chunk_sizes: Vec<u64>,
-    }
-    impl SimpleArenaAllocator {
-        fn new() -> Self {
-            SimpleArenaAllocator {
-                min_chunk_size: 4096,
-                total_bytes: 0, used_bytes: 0, avail_bytes: 0,
-                avail_buf: std::ptr::null_mut(),
-                continuous_used_memory_bytes: 0, continuous_used: false,
-                growth_factor: 2,
-                linear_growth_threshold: 512 * 1024,
-                chunks: Vec::new(), chunk_sizes: Vec::new(),
-            }
-        }
-        fn get_next_size(&self, size: u64) -> u64 {
-            if self.chunks.is_empty() {
-                return size.max(self.min_chunk_size as u64);
-            }
-            let last = *self.chunk_sizes.last().unwrap();
-            if last < self.linear_growth_threshold as u64 {
-                size.max(last * self.growth_factor as u64)
-            } else {
-                let t = self.linear_growth_threshold as u64;
-                ((size + t - 1) / t) * t
-            }
-        }
-        fn allocate_chunk(&mut self, size: u64) {
-            let ptr = unsafe { libc::malloc(size as usize) as *mut u8 };
-            self.chunks.push(ptr);
-            self.chunk_sizes.push(size);
-            self.avail_buf = ptr;
-            self.avail_bytes = size;
-            self.total_bytes += size;
-        }
-        fn allocate(&mut self, size: usize) -> *mut u8 {
-            if size == 0 {
-                return std::ptr::NonNull::<u8>::dangling().as_ptr();
-            }
-            if self.avail_bytes < size as u64 {
-                self.allocate_chunk(self.get_next_size(size as u64));
-            }
-            let ret = self.avail_buf;
-            self.avail_buf = unsafe { self.avail_buf.add(size) };
-            self.avail_bytes -= size as u64;
-            ret
-        }
-    }
-    impl Drop for SimpleArenaAllocator {
-        fn drop(&mut self) {
-            for &p in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } }
-        }
-    }
-
-    let mut pool = SimpleArenaAllocator::new();
-    let num_cols = std::hint::black_box(NUM_STR_COLS);
+    // Driven by hash table emplace (same call pattern as FULL pipeline)
+    let key_sizes = vec![0usize; NUM_STR_COLS];
+    let kinds = vec![ColumnKind::Varchar; NUM_STR_COLS];
+    let mut rc = RowContainer::with_kinds(&key_sizes, &kinds, 8);
+    let mut table = TaperHashMap::with_capacity(d.num_chunks);
+    let agg_offset = rc.agg_state_offset();
     let mut checksum: u64 = 0;
-    // Use flat column pointers (same as FULL pipeline's ColumnInput access pattern)
-    let col_ptrs: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| d.slices[c].as_ptr()).collect();
-    for i in 0..d.total_rows {
-        let mut total_size = 0usize;
-        for c in 0..num_cols {
-            let s = unsafe { &*col_ptrs[c].add(i) };
-            total_size += 1 + compute_row_len_size(s.len) as usize + s.len;
-        }
-        let block = pool.allocate(total_size);
-        let mut wp = block;
-        for c in 0..num_cols {
-            let s = unsafe { &*col_ptrs[c].add(i) };
-            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
-            wp = unsafe { wp.add(written) };
-        }
-        checksum = checksum.wrapping_add(block as u64);
+
+    let num_batches = (d.total_rows + BATCH_SIZE - 1) / BATCH_SIZE;
+    for batch_idx in 0..num_batches {
+        let start = batch_idx * BATCH_SIZE;
+        let end = (start + BATCH_SIZE).min(d.total_rows);
+        let batch_hashes = &d.hashes[start..end];
+        // colSlices[c] → pointer to slice array for this batch
+        let col_slices: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| unsafe { d.slices[c].as_ptr().add(start) }).collect();
+
+        let rc_ptr = &mut rc as *mut RowContainer;
+        table.emplace_batch_full(
+            batch_hashes,
+            &|_: usize, _: &SlotValue| -> bool { true },
+            &mut |row_idx: usize, sv: &mut SlotValue| {
+                let rc = unsafe { &mut *rc_ptr };
+                let row = rc.new_row();
+                // StoreKeyOneRow — serialize 4 varchars (same as FULL pipeline on_init)
+                let mut total_size = 0usize;
+                for c in 0..NUM_STR_COLS {
+                    let s = unsafe { &*col_slices[c].add(row_idx) };
+                    total_size += 1 + compute_row_len_size(s.len) as usize + s.len;
+                }
+                let block = rc.arena_alloc(total_size);
+                let mut wp = block;
+                for c in 0..NUM_STR_COLS {
+                    let s = unsafe { &*col_slices[c].add(row_idx) };
+                    let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
+                    wp = unsafe { wp.add(written) };
+                }
+                unsafe { (row as *mut *const u8).write_unaligned(block as *const u8); }
+                RowContainer::store_value::<i64>(row, agg_offset, 0);
+                sv.set_ptr(row as *const u8);
+            },
+            &mut |_: usize, _: &SlotValue, is_new: bool| { if is_new { checksum += 1; } },
+        );
     }
     checksum
 }
