@@ -172,33 +172,70 @@ fn bench_new_row(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_serialize_key(d: &TestData) -> u64 {
-    // Standalone arena — same as C++ SimpleArenaAllocator pool on stack
-    // SimpleArenaAllocator — same as C++ taper::SimpleArenaAllocator
+    // SimpleArenaAllocator — exact replica of C++ taper::SimpleArenaAllocator (OmniOperator)
+    // All 11 member variables preserved to match struct size and codegen behavior.
     struct SimpleArenaAllocator {
-        chunks: Vec<(*mut u8, usize)>,
-        buf: *mut u8,
-        avail: usize,
+        min_chunk_size: i64,
+        total_bytes: u64,
+        used_bytes: u64,
+        avail_bytes: u64,
+        avail_buf: *mut u8,
+        continuous_used_memory_bytes: u64,
+        continuous_used: bool,
+        growth_factor: u32,
+        linear_growth_threshold: i64,
+        chunks: Vec<*mut u8>,
+        chunk_sizes: Vec<u64>,
     }
     impl SimpleArenaAllocator {
-        fn new() -> Self { SimpleArenaAllocator { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
-        fn allocate(&mut self, size: usize) -> *mut u8 {
-            if self.avail < size {
-                let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
-                    let last = self.chunks.last().unwrap().1;
-                    if last < 512*1024 { last * 2 } else { ((size + 512*1024 - 1) / (512*1024)) * 512*1024 }
-                });
-                let ptr = unsafe { libc::malloc(chunk_size) as *mut u8 };
-                self.chunks.push((ptr, chunk_size));
-                self.buf = ptr; self.avail = chunk_size;
+        fn new() -> Self {
+            SimpleArenaAllocator {
+                min_chunk_size: 4096,
+                total_bytes: 0, used_bytes: 0, avail_bytes: 0,
+                avail_buf: std::ptr::null_mut(),
+                continuous_used_memory_bytes: 0, continuous_used: false,
+                growth_factor: 2,
+                linear_growth_threshold: 512 * 1024,
+                chunks: Vec::new(), chunk_sizes: Vec::new(),
             }
-            let ret = self.buf;
-            self.buf = unsafe { self.buf.add(size) };
-            self.avail -= size;
+        }
+        fn get_next_size(&self, size: u64) -> u64 {
+            if self.chunks.is_empty() {
+                return size.max(self.min_chunk_size as u64);
+            }
+            let last = *self.chunk_sizes.last().unwrap();
+            if last < self.linear_growth_threshold as u64 {
+                size.max(last * self.growth_factor as u64)
+            } else {
+                let t = self.linear_growth_threshold as u64;
+                ((size + t - 1) / t) * t
+            }
+        }
+        fn allocate_chunk(&mut self, size: u64) {
+            let ptr = unsafe { libc::malloc(size as usize) as *mut u8 };
+            self.chunks.push(ptr);
+            self.chunk_sizes.push(size);
+            self.avail_buf = ptr;
+            self.avail_bytes = size;
+            self.total_bytes += size;
+        }
+        fn allocate(&mut self, size: usize) -> *mut u8 {
+            if size == 0 {
+                return std::ptr::NonNull::<u8>::dangling().as_ptr();
+            }
+            if self.avail_bytes < size as u64 {
+                self.allocate_chunk(self.get_next_size(size as u64));
+            }
+            let ret = self.avail_buf;
+            self.avail_buf = unsafe { self.avail_buf.add(size) };
+            self.avail_bytes -= size as u64;
             ret
         }
     }
     impl Drop for SimpleArenaAllocator {
-        fn drop(&mut self) { for &(p, _) in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } } }
+        fn drop(&mut self) {
+            for &p in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } }
+        }
     }
 
     let mut pool = SimpleArenaAllocator::new();
