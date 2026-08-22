@@ -53,7 +53,8 @@ static TestData GenData(double sel) {
     size_t nc = 1; while (nc < numChunks) nc <<= 1; numChunks = nc;
     size_t capacity = numChunks * 8;
 
-    size_t distinctKeys = static_cast<size_t>(capacity * 0.89);
+    size_t expandThreshold = capacity * 9 / 10;
+    size_t distinctKeys = expandThreshold - 1;
     if (distinctKeys < 1) distinctKeys = 1;
 
     size_t numKeys = static_cast<size_t>(distinctKeys * sel);

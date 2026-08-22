@@ -201,7 +201,7 @@ fn main() {
 
     let num_chunks = (HT_SIZE / 8).max(1).next_power_of_two();
     let capacity = num_chunks * 8;
-    let distinct_keys = ((capacity as f64 * 0.89) as usize).max(1);
+    let distinct_keys = (capacity * 9 / 10 - 1).max(1);
     let num_keys = ((distinct_keys as f64 * sel) as usize).max(1);
     let probe_misses = distinct_keys - num_keys;
     let probe_hits = if NUM_PROBE_ROWS > probe_misses { NUM_PROBE_ROWS - probe_misses } else { 0 };

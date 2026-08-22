@@ -45,7 +45,10 @@ fn gen_data(sel: f64, ht_size: usize) -> TestData {
     // ─── Two params only: ht_size + sel ───
     let num_chunks = (ht_size / 8).max(1).next_power_of_two();
     let capacity = num_chunks * 8;
-    let distinct_keys = ((capacity as f64 * 0.89) as usize).max(1);
+    // distinctKeys = expandThreshold - 1, matching C++ integer arithmetic exactly.
+    // C++ threshold: capacity * 9 / 10. We stay 1 below → impossible to trigger expand.
+    let expand_threshold = capacity * 9 / 10;
+    let distinct_keys = (expand_threshold - 1).max(1);
 
     // sel controls build/probe split:
     //   numKeys = distinctKeys * sel (inserted during build)

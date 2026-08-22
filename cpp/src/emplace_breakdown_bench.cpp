@@ -62,8 +62,11 @@ static TestData GenData(double sel) {
     size_t nc = 1; while (nc < numChunks) nc <<= 1; numChunks = nc;
     size_t capacity = numChunks * 8;
 
-    // Total distinct keys = 89% of capacity (max fill without expand)
-    size_t distinctKeys = static_cast<size_t>(capacity * 0.89);
+    // Total distinct keys: use integer arithmetic matching C++ expandThreshold exactly.
+    // C++ threshold: expandThreshold_ = capacity * 9 / 10
+    // We set distinctKeys = capacity * 9 / 10 - 1, guaranteed < threshold.
+    size_t expandThreshold = capacity * 9 / 10;
+    size_t distinctKeys = expandThreshold - 1;
     if (distinctKeys < 1) distinctKeys = 1;
 
     // sel controls how many distinct keys are inserted in the build phase vs probe phase:

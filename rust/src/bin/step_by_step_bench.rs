@@ -35,7 +35,8 @@ fn gen_data(sel: f64, ht_size: usize) -> TestData {
     // ─── Two params only: ht_size + sel ───
     let num_chunks = (ht_size / 8).max(1).next_power_of_two();
     let capacity = num_chunks * 8;
-    let distinct_keys = ((capacity as f64 * 0.89) as usize).max(1);
+    let expand_threshold = capacity * 9 / 10;
+    let distinct_keys = (expand_threshold - 1).max(1);
 
     let num_keys = ((distinct_keys as f64 * sel) as usize).max(1);
     let probe_misses = distinct_keys - num_keys;
