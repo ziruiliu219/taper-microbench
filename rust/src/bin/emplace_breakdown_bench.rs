@@ -347,6 +347,34 @@ fn bench_memcpy_only(d: &TestData) -> u64 {
     checksum
 }
 
+/// 7e. memcpy with forced load serialization (black_box ptr+len to prevent OOO overlap)
+/// This simulates what GCC generates: load must complete before memcpy can start.
+#[inline(never)]
+fn bench_memcpy_serialized(d: &TestData) -> u64 {
+    let max_per_row = 4 * 30;
+    let buf_size = d.total_rows * max_per_row;
+    let buf = unsafe { libc::malloc(buf_size) as *mut u8 };
+    unsafe { libc::memset(buf as *mut libc::c_void, 0, buf_size); }
+
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
+    let mut checksum: u64 = 0;
+    let mut wp = buf;
+    for i in 0..d.total_rows {
+        for c in 0..num_cols {
+            unsafe {
+                // Force the CPU to materialize ptr and len before calling memcpy
+                let ptr = std::hint::black_box(d.slices[c][i].ptr);
+                let len = std::hint::black_box(d.slices[c][i].len);
+                libc::memcpy(wp as *mut libc::c_void, ptr as *const libc::c_void, len);
+                wp = wp.add(len);
+            }
+        }
+        checksum = checksum.wrapping_add(wp as u64);
+    }
+    unsafe { libc::free(buf as *mut libc::c_void); }
+    checksum
+}
+
 /// 7c. memcpy with flat array (eliminate vector-of-vector indirection)
 #[inline(never)]
 fn bench_memcpy_flat(d: &TestData) -> u64 {
@@ -642,6 +670,7 @@ fn main() {
     if should_run("7") { bench("7a.serialize_prealloc", bench_serialize_prealloc); }
     if should_run("7") { bench("7b.memcpy_only", bench_memcpy_only); }
     if should_run("7") { bench("7c.memcpy_flat", bench_memcpy_flat); }
+    if should_run("7") { bench("7e.memcpy_serialized", bench_memcpy_serialized); }
     if should_run("7") { bench("7d.serialize_noinline_memcpy", bench_serialize_key_noinline); }
     if should_run("8") { bench("8. store_value_i64", bench_store_value); }
     if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
