@@ -45,14 +45,19 @@ inline size_t SerializeVarcharToBuffer(uint8_t* writePos, const uint8_t* data, s
 inline size_t ComputeVarCharSerializedSize(const uint8_t* data) {
     uint8_t rowLenSize = *data; if (!rowLenSize) return 1;
     size_t stringLen=0;
-    switch(rowLenSize){case 1:stringLen=*(data+1);break;case 2:{uint16_t v;memcpy(&v,data+1,2);stringLen=v;break;}default:{uint32_t v;memcpy(&v,data+1,4);stringLen=v;}}
+    switch(rowLenSize){case 1:stringLen=*(data+1);break;case 2:{uint16_t v;memcpy(&v,data+1,2);stringLen=v;break;}case 4:{uint32_t v;memcpy(&v,data+1,4);stringLen=v;break;}default:return 1;}
     return 1+rowLenSize+stringLen;
 }
 
 inline bool CompareVarcharFromRow(const uint8_t* rowData, const uint8_t* input, size_t inputLen) {
     uint8_t rowLenSize = *rowData; if(!rowLenSize) return false;
     size_t stringLen=0;
-    switch(rowLenSize){case 1:stringLen=*(rowData+1);break;case 2:{uint16_t v;memcpy(&v,rowData+1,2);stringLen=v;break;}default:{uint32_t v;memcpy(&v,rowData+1,4);stringLen=v;}}
+    switch(rowLenSize){
+        case 1: stringLen = *(rowData+1); break;
+        case 2: { uint16_t v; memcpy(&v, rowData+1, 2); stringLen = v; break; }
+        case 4: { uint32_t v; memcpy(&v, rowData+1, 4); stringLen = v; break; }
+        default: return false;
+    }
     if (stringLen!=inputLen) return false;
     if (stringLen==0) return true;
     const uint8_t* stored = rowData+1+rowLenSize;
