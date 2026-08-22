@@ -96,89 +96,76 @@ static TestData GenData(double sel) {
     return d;
 }
 
-// ─── Individual Steps ────────────────────────────────────────────
+// ─── Individual Steps (using real taper API) ────────────────────
 
-// 1. Hash & position
+// 1. Hash & position (uses real TaperFlatHashTable::BenchHash + BenchGetChunkPos)
 __attribute__((noinline))
 static uint64_t BenchHashAndPosition(const TestData& d) {
-    uint32_t mask = static_cast<uint32_t>(d.numChunks - 1);
+    taper::TaperFlatHashTable table(d.numChunks);
     uint64_t checksum = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
-        uint64_t hv = static_cast<uint64_t>(d.hashes[i]); // Hash is identity (KeyScattered)
-        uint32_t pos = static_cast<uint32_t>(hv >> 7) & mask;
+        uint64_t hv = table.BenchHash(d.hashes[i]);
+        uint32_t pos = table.BenchGetChunkPos(hv);
         checksum += pos;
     }
     return checksum;
 }
 
-// 2. Prefetch (simulated)
-__attribute__((noinline))
-static uint64_t BenchPrefetch(const TestData& d) {
-    // Allocate fake chunks array and prefetch into it
-    size_t numChunks = d.numChunks;
-    std::vector<char> fakeChunks(numChunks * 128, 0); // 128 bytes per chunk
-    uint32_t mask = static_cast<uint32_t>(numChunks - 1);
-    uint64_t checksum = 0;
-    for (size_t i = 0; i < d.totalRows; i++) {
-        uint64_t hv = static_cast<uint64_t>(d.hashes[i]);
-        uint32_t pos = static_cast<uint32_t>(hv >> 7) & mask;
-        const char* p = fakeChunks.data() + pos * 128;
-        __builtin_prefetch(p);
-        __builtin_prefetch(p + 64);
-        checksum += pos;
-    }
-    return checksum;
-}
-
-// 3. Load tags (load uint64 from chunk)
+// 3. Load tags (uses real ChunkAt->TagsU64)
 __attribute__((noinline))
 static uint64_t BenchLoadTags(const TestData& d) {
-    size_t numChunks = d.numChunks;
-    // Simulate chunk array with tags
-    std::vector<uint64_t> tags(numChunks, 0x8080808080808080ULL); // all empty
-    uint32_t mask = static_cast<uint32_t>(numChunks - 1);
+    taper::TaperFlatHashTable table(d.numChunks);
     uint64_t checksum = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
-        uint64_t hv = static_cast<uint64_t>(d.hashes[i]);
-        uint32_t pos = static_cast<uint32_t>(hv >> 7) & mask;
-        uint64_t t = tags[pos];
+        uint64_t hv = table.BenchHash(d.hashes[i]);
+        uint32_t pos = table.BenchGetChunkPos(hv);
+        uint64_t t = table.ChunkAt(pos)->TagsU64();
         checksum += t;
     }
     return checksum;
 }
 
-// 4. Match tag (SWAR tag match)
+// 4. Match tag (uses real PHBitMask::MatchTag on real chunks)
 __attribute__((noinline))
 static uint64_t BenchMatchTag(const TestData& d) {
-    size_t numChunks = d.numChunks;
-    std::vector<uint64_t> tags(numChunks, 0x8080808080808080ULL);
-    uint32_t mask = static_cast<uint32_t>(numChunks - 1);
+    taper::TaperFlatHashTable table(d.numChunks);
     uint64_t checksum = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
-        uint64_t hv = static_cast<uint64_t>(d.hashes[i]);
-        uint32_t pos = static_cast<uint32_t>(hv >> 7) & mask;
+        uint64_t hv = table.BenchHash(d.hashes[i]);
+        uint32_t pos = table.BenchGetChunkPos(hv);
         uint8_t tagHash = (hv >> 16) & 0x7F;
-        uint64_t t = tags[pos];
-        // SWAR match
-        uint64_t tagBroadcast = 0x0101010101010101ULL * tagHash;
-        uint64_t xored = t ^ tagBroadcast;
-        uint64_t matched = ~((((xored) & 0x7F7F7F7F7F7F7F7FULL) + 0x7F7F7F7F7F7F7F7FULL) | xored | 0x7F7F7F7F7F7F7F7FULL);
-        checksum += matched;
+        uint64_t tags = table.ChunkAt(pos)->TagsU64();
+        for (auto it = taper::PHBitMask::MatchTag(tags, tagHash); it; ++it) {
+            checksum += *it;
+        }
     }
     return checksum;
 }
 
-// 5. Compare key (int64 equality)
+// 5. Compare key (uses real chunk->keys[slot] via ChunkAt, on a pre-built hashmap)
 __attribute__((noinline))
 static uint64_t BenchCompareKeyHash(const TestData& d) {
-    // Build a simple key array to compare against
-    std::vector<uint64_t> storedKeys(d.numKeys);
-    for (size_t i = 0; i < d.numKeys; i++) storedKeys[i] = static_cast<uint64_t>(d.hashes[i]);
+    // Build a real hashmap first
+    taper::TaperFlatHashTable table(d.numChunks);
+    table.EmplaceBatch(d.hashes.data(), static_cast<int32_t>(d.numKeys),
+        [](int32_t) { return false; },
+        [](uint32_t, char*) {},
+        [](uint32_t, char*, bool) {});
+    // Now probe: for each row, find the chunk and compare key
     uint64_t matchCount = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
-        uint64_t key = static_cast<uint64_t>(d.hashes[i]);
-        uint64_t stored = storedKeys[i % d.numKeys];
-        if (key == stored) matchCount++;
+        uint64_t hv = table.BenchHash(d.hashes[i]);
+        uint32_t pos = table.BenchGetChunkPos(hv);
+        uint8_t tagHash = (hv >> 16) & 0x7F;
+        const auto* chunk = table.ChunkAt(pos);
+        uint64_t tags = chunk->TagsU64();
+        for (auto it = taper::PHBitMask::MatchTag(tags, tagHash); it; ++it) {
+            uint32_t slot = *it;
+            if (chunk->keys[slot] == static_cast<uint64_t>(d.hashes[i])) {
+                matchCount++;
+                break;
+            }
+        }
     }
     return matchCount;
 }
@@ -349,7 +336,6 @@ int main(int argc, char** argv) {
     printf("=== C++ EmplaceBatch Breakdown (ht=%zu, lf=%.2f, sel=%.2f, %zu iters, %zu rows) ===\n",
            G_HT_SIZE, G_LOAD_FACTOR, sel, numIters, data.totalRows);
     if (shouldRun("1")) bench("1. hash_and_position", BenchHashAndPosition);
-    if (shouldRun("2")) bench("2. prefetch", BenchPrefetch);
     if (shouldRun("3")) bench("3. load_tags", BenchLoadTags);
     if (shouldRun("4")) bench("4. match_tag_swar", BenchMatchTag);
     if (shouldRun("5")) bench("5. compare_key_hash", BenchCompareKeyHash);

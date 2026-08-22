@@ -213,6 +213,11 @@ public:
         }
     }
 
+    // ─── Bench helpers (expose internals for micro benchmarks) ───
+    uint64_t BenchHash(Key key) const { return Hash(key); }
+    ChunkPos BenchGetChunkPos(uint64_t h) const { return GetChunkPos(h); }
+    size_t NumChunks() const { return static_cast<size_t>(lastChunkIdx_) + 1; }
+
 private:
     uint64_t Hash(Key key) const { return static_cast<uint64_t>(key); } // KeyScattered=true
     ChunkPos GetChunkPos(uint64_t h) const { return h & lastChunkIdx_; }
