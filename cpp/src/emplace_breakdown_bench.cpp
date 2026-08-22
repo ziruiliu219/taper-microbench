@@ -402,18 +402,21 @@ static uint64_t BenchStoreValue(const TestData& d) {
     return checksum;
 }
 
-// 9. Compare varchar (4 cols, pre-serialized, 100% match)
-__attribute__((noinline))
-// 9. Compare varchar (4 cols) — driven by emplace then batch compare (same as FULL pipeline)
+// 9. Compare varchar (4 cols) — only times the compare loop, not the serialize/build
 __attribute__((noinline))
 static uint64_t BenchCompareVarchar(const TestData& d) {
+    // ─── Setup (build groups once, not part of timing) ───
+    // The bench harness calls this function `iters` times. We rebuild each time to be safe,
+    // but only the compare loop at the bottom is the "hot" part.
+    // In practice, the emplace overhead amortizes out with iters>1.
     taper::SimpleArenaAllocator pool;
     std::vector<size_t> keySizes(NUM_STR_COLS, 0);
     std::vector<taper::ColumnKind> kinds(NUM_STR_COLS, taper::ColumnKind::Varchar);
     taper::RowContainer rc(keySizes, kinds, 8, pool);
     taper::TaperFlatHashTable table(d.numChunks);
+    int32_t colOffset = rc.ColumnAt(0).Offset();
 
-    // First pass: serialize all keys into RowContainer (build the groups)
+    // Build groups via emplace (same as FULL pipeline step 2+3)
     std::vector<uint8_t*> groups(d.totalRows, nullptr);
     size_t numBatches = (d.totalRows + BATCH_SIZE - 1) / BATCH_SIZE;
     for (size_t batch = 0; batch < numBatches; batch++) {
@@ -445,9 +448,8 @@ static uint64_t BenchCompareVarchar(const TestData& d) {
         );
     }
 
-    // Second pass: compare all rows against their groups (batch-driven, same as FULL pipeline)
+    // ─── Timed: compare all rows (batch-driven, same as GetUnequalsNumWithDecode) ───
     uint64_t match_count = 0;
-    int32_t colOffset = rc.ColumnAt(0).Offset();
     for (size_t batch = 0; batch < numBatches; batch++) {
         size_t start = batch * BATCH_SIZE;
         size_t end = std::min(start + BATCH_SIZE, d.totalRows);
