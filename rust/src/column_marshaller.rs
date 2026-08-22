@@ -62,6 +62,36 @@ pub fn serialize_varchar_to_buffer(write_pos: *mut u8, data: &[u8]) -> usize {
     1 + row_len_size as usize + string_len
 }
 
+/// Same as serialize_varchar_to_buffer but forces memcpy to go through PLT
+/// (prevents LLVM from inlining it). Used to verify that the C++/Rust gap
+/// is caused by LLVM inlining memcpy vs GCC not inlining it.
+#[inline]
+pub fn serialize_varchar_to_buffer_noinline_memcpy(write_pos: *mut u8, data: &[u8]) -> usize {
+    // Use function pointer to prevent LLVM from recognizing this as memcpy intrinsic
+    let memcpy_fn: unsafe extern "C" fn(*mut libc::c_void, *const libc::c_void, usize) -> *mut libc::c_void = libc::memcpy;
+    let memcpy_ptr = std::hint::black_box(memcpy_fn);
+
+    let string_len = data.len();
+    let row_len_size = compute_row_len_size(string_len);
+    unsafe {
+        *write_pos = row_len_size;
+        let l32 = string_len as u32;
+        memcpy_ptr(
+            write_pos.add(1) as *mut libc::c_void,
+            &l32 as *const u32 as *const libc::c_void,
+            row_len_size as usize,
+        );
+        if string_len > 0 {
+            memcpy_ptr(
+                write_pos.add(1 + row_len_size as usize) as *mut libc::c_void,
+                data.as_ptr() as *const libc::c_void,
+                string_len,
+            );
+        }
+    }
+    1 + row_len_size as usize + string_len
+}
+
 /// Serialize a null VARCHAR marker `[0]`. Returns bytes written (always 1).
 /// Mirrors C++ `NullVariableTypeSerializer`.
 #[inline]

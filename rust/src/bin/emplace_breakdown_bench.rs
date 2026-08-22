@@ -7,6 +7,7 @@ use taper_hashmap::column_marshaller::{
     TaperColumnSerializeHandler, ColumnDesc, ColumnInput,
     serialize_varchar_to_buffer, compute_row_len_size, compare_varchar_from_row,
     compute_varchar_serialized_size,
+    serialize_varchar_to_buffer_noinline_memcpy,
 };
 use taper_hashmap::row_container::{RowContainer, ColumnKind};
 use taper_hashmap::taper_hashmap::TaperHashMap;
@@ -282,6 +283,55 @@ fn bench_serialize_key(d: &TestData) -> u64 {
     checksum
 }
 
+/// Same as bench_serialize_key but uses noinline memcpy (forces PLT call like C++/GCC)
+#[inline(never)]
+fn bench_serialize_key_noinline(d: &TestData) -> u64 {
+    struct SimpleArenaAllocator {
+        avail_bytes: u64,
+        avail_buf: *mut u8,
+        chunks: Vec<(*mut u8, usize)>,
+    }
+    impl SimpleArenaAllocator {
+        fn new() -> Self { SimpleArenaAllocator { avail_bytes: 0, avail_buf: std::ptr::null_mut(), chunks: Vec::new() } }
+        fn allocate(&mut self, size: usize) -> *mut u8 {
+            if self.avail_bytes < size as u64 {
+                let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
+                    let last = self.chunks.last().unwrap().1;
+                    if last < 512*1024 { last * 2 } else { ((size + 512*1024 - 1) / (512*1024)) * 512*1024 }
+                });
+                let ptr = unsafe { libc::malloc(chunk_size) as *mut u8 };
+                self.chunks.push((ptr, chunk_size));
+                self.avail_buf = ptr; self.avail_bytes = chunk_size as u64;
+            }
+            let ret = self.avail_buf;
+            self.avail_buf = unsafe { self.avail_buf.add(size) };
+            self.avail_bytes -= size as u64;
+            ret
+        }
+    }
+    impl Drop for SimpleArenaAllocator {
+        fn drop(&mut self) { for &(p, _) in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } } }
+    }
+
+    let mut pool = SimpleArenaAllocator::new();
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
+    let mut checksum: u64 = 0;
+    for i in 0..d.total_rows {
+        let mut total_size = 0usize;
+        for c in 0..num_cols {
+            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
+        }
+        let block = pool.allocate(total_size);
+        let mut wp = block;
+        for c in 0..num_cols {
+            let written = serialize_varchar_to_buffer_noinline_memcpy(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
+            wp = unsafe { wp.add(written) };
+        }
+        checksum = checksum.wrapping_add(block as u64);
+    }
+    checksum
+}
+
 #[inline(never)]
 fn bench_store_value(d: &TestData) -> u64 {
     let ks = vec![0usize; 4];
@@ -437,6 +487,7 @@ fn main() {
     if should_run("5") { bench("5. compare_key_hash", bench_compare_key_hash); }
     if should_run("6") { bench("6. new_row", bench_new_row); }
     if should_run("7") { bench("7. serialize_key_4col", bench_serialize_key); }
+    if should_run("7") { bench("7b.serialize_noinline_memcpy", bench_serialize_key_noinline); }
     if should_run("8") { bench("8. store_value_i64", bench_store_value); }
     if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
     if should_run("10") { bench("10. accumulate", bench_accumulate); }
