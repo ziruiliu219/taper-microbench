@@ -521,6 +521,67 @@ fn bench_accumulate(d: &TestData) -> u64 {
     checksum
 }
 
+// ─── Minimal isolated benchmarks (fixed data, no traversal) ─────────────
+
+/// M1. serialize_single: one fixed 12-byte string, 4M iterations
+#[inline(never)]
+fn bench_serialize_single(d: &TestData) -> u64 {
+    let iters = d.total_rows * NUM_STR_COLS;
+    let test_str: &[u8] = b"key_12345_c0";
+    let buf_size = iters * (1 + 1 + test_str.len());
+    let buf = unsafe { libc::malloc(buf_size) as *mut u8 };
+    unsafe { libc::memset(buf as *mut libc::c_void, 0, buf_size); }
+
+    let mut wp = buf;
+    for _ in 0..iters {
+        let written = serialize_varchar_to_buffer(wp, test_str);
+        wp = unsafe { wp.add(written) };
+    }
+    let checksum = wp as u64;
+    unsafe { libc::free(buf as *mut libc::c_void); }
+    checksum
+}
+
+/// M2. memcpy_single: just memcpy 12 bytes, 4M iterations
+#[inline(never)]
+fn bench_memcpy_single(d: &TestData) -> u64 {
+    let iters = d.total_rows * NUM_STR_COLS;
+    let test_str: &[u8] = b"key_12345_c0";
+    let mut test_len = test_str.len();
+    test_len = std::hint::black_box(test_len); // prevent constant propagation
+    let buf_size = iters * test_len;
+    let buf = unsafe { libc::malloc(buf_size) as *mut u8 };
+    unsafe { libc::memset(buf as *mut libc::c_void, 0, buf_size); }
+
+    let mut wp = buf;
+    for _ in 0..iters {
+        unsafe {
+            libc::memcpy(wp as *mut libc::c_void, test_str.as_ptr() as *const libc::c_void, test_len);
+            wp = wp.add(test_len);
+        }
+    }
+    let checksum = wp as u64;
+    unsafe { libc::free(buf as *mut libc::c_void); }
+    checksum
+}
+
+/// M3. compare_single: CompareVarcharFromRow on one pre-serialized 12-byte string, 4M iters
+#[inline(never)]
+fn bench_compare_single(d: &TestData) -> u64 {
+    let iters = d.total_rows * NUM_STR_COLS;
+    let test_str: &[u8] = b"key_12345_c0";
+    let mut serialized = [0u8; 20];
+    serialize_varchar_to_buffer(serialized.as_mut_ptr(), test_str);
+
+    let mut match_count: u64 = 0;
+    for _ in 0..iters {
+        if compare_varchar_from_row(serialized.as_ptr(), test_str) {
+            match_count += 1;
+        }
+    }
+    match_count
+}
+
 #[inline(never)]
 fn bench_full_pipeline(d: &TestData) -> u64 {
     let col_descs = vec![ColumnDesc::Varchar; NUM_STR_COLS];
@@ -585,4 +646,7 @@ fn main() {
     if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
     if should_run("10") { bench("10. accumulate", bench_accumulate); }
     if should_run("F") || should_run("11") { bench("FULL: pipeline", bench_full_pipeline); }
+    if should_run("M") { bench("M1.serialize_single_12B", bench_serialize_single); }
+    if should_run("M") { bench("M2.memcpy_single_12B", bench_memcpy_single); }
+    if should_run("M") { bench("M3.compare_single_12B", bench_compare_single); }
 }

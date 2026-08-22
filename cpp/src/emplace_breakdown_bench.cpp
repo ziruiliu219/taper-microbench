@@ -435,6 +435,72 @@ static uint64_t BenchAccumulate(const TestData& d) {
     return checksum;
 }
 
+// ─── Minimal isolated benchmarks (fixed data, no traversal) ─────────────
+// These test single-function call overhead with zero data-access noise.
+
+// M1. serialize_single: one fixed 12-byte string, 4M iterations (same as totalRows*4cols)
+__attribute__((noinline))
+static uint64_t BenchSerializeSingle(const TestData& d) {
+    size_t iters = d.totalRows * NUM_STR_COLS;
+    // Fixed 12-byte test string (typical key length "key_1234_c0")
+    const uint8_t testStr[] = "key_12345_c0";
+    size_t testLen = 12;
+    // Pre-alloc buffer large enough
+    size_t bufSize = iters * (1 + 1 + testLen);
+    uint8_t* buf = static_cast<uint8_t*>(malloc(bufSize));
+    memset(buf, 0, bufSize); // touch pages
+
+    uint64_t checksum = 0;
+    uint8_t* wp = buf;
+    for (size_t i = 0; i < iters; i++) {
+        wp += taper::SerializeVarcharToBuffer(wp, testStr, testLen);
+    }
+    checksum = reinterpret_cast<uint64_t>(wp);
+    free(buf);
+    return checksum;
+}
+
+// M2. memcpy_single: just memcpy 12 bytes, 4M iterations
+__attribute__((noinline))
+static uint64_t BenchMemcpySingle(const TestData& d) {
+    size_t iters = d.totalRows * NUM_STR_COLS;
+    const uint8_t testStr[] = "key_12345_c0";
+    size_t testLen = 12;
+    size_t bufSize = iters * testLen;
+    uint8_t* buf = static_cast<uint8_t*>(malloc(bufSize));
+    memset(buf, 0, bufSize);
+
+    uint64_t checksum = 0;
+    uint8_t* wp = buf;
+    size_t len = testLen;
+    asm volatile("" : "+r"(len)); // prevent constant propagation of len
+    for (size_t i = 0; i < iters; i++) {
+        memcpy(wp, testStr, len);
+        wp += len;
+    }
+    checksum = reinterpret_cast<uint64_t>(wp);
+    free(buf);
+    return checksum;
+}
+
+// M3. compare_single: CompareVarcharFromRow on one pre-serialized 12-byte string, 4M iterations
+__attribute__((noinline))
+static uint64_t BenchCompareSingle(const TestData& d) {
+    size_t iters = d.totalRows * NUM_STR_COLS;
+    // Serialize one string to compare against
+    uint8_t serialized[20];
+    const uint8_t testStr[] = "key_12345_c0";
+    size_t testLen = 12;
+    taper::SerializeVarcharToBuffer(serialized, testStr, testLen);
+
+    uint64_t match_count = 0;
+    for (size_t i = 0; i < iters; i++) {
+        if (taper::CompareVarcharFromRow(serialized, testStr, testLen))
+            match_count++;
+    }
+    return match_count;
+}
+
 // FULL pipeline
 __attribute__((noinline, flatten))
 static uint64_t BenchFullPipeline(const TestData& d) {
@@ -503,6 +569,9 @@ int main(int argc, char** argv) {
     if (shouldRun("9")) bench("9. compare_varchar_4col", BenchCompareVarchar);
     if (shouldRun("10")) bench("10. accumulate", BenchAccumulate);
     if (shouldRun("FULL") || shouldRun("11")) bench("FULL: pipeline", BenchFullPipeline);
+    if (shouldRun("M")) bench("M1.serialize_single_12B", BenchSerializeSingle);
+    if (shouldRun("M")) bench("M2.memcpy_single_12B", BenchMemcpySingle);
+    if (shouldRun("M")) bench("M3.compare_single_12B", BenchCompareSingle);
 
     return 0;
 }
