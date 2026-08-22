@@ -172,9 +172,35 @@ fn bench_new_row(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_serialize_key(d: &TestData) -> u64 {
-    let ks = vec![0usize; 4];
-    let kinds = vec![ColumnKind::Varchar; 4];
-    let mut rc = RowContainer::with_kinds(&ks, &kinds, 8);
+    // Standalone arena — same as C++ SimpleArenaAllocator pool on stack
+    struct Arena {
+        chunks: Vec<(*mut u8, usize)>,
+        buf: *mut u8,
+        avail: usize,
+    }
+    impl Arena {
+        fn new() -> Self { Arena { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
+        fn allocate(&mut self, size: usize) -> *mut u8 {
+            if self.avail < size {
+                let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
+                    let last = self.chunks.last().unwrap().1;
+                    if last < 512*1024 { last * 2 } else { ((size + 512*1024 - 1) / (512*1024)) * 512*1024 }
+                });
+                let ptr = unsafe { libc::malloc(chunk_size) as *mut u8 };
+                self.chunks.push((ptr, chunk_size));
+                self.buf = ptr; self.avail = chunk_size;
+            }
+            let ret = self.buf;
+            self.buf = unsafe { self.buf.add(size) };
+            self.avail -= size;
+            ret
+        }
+    }
+    impl Drop for Arena {
+        fn drop(&mut self) { for &(p, _) in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } } }
+    }
+
+    let mut pool = Arena::new();
     let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut checksum: u64 = 0;
     for i in 0..d.total_rows {
@@ -182,7 +208,7 @@ fn bench_serialize_key(d: &TestData) -> u64 {
         for c in 0..num_cols {
             total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
         }
-        let block = rc.arena_alloc(total_size);
+        let block = pool.allocate(total_size);
         let mut wp = block;
         for c in 0..num_cols {
             let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
@@ -211,9 +237,34 @@ fn bench_store_value(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_compare_varchar(d: &TestData) -> u64 {
-    let ks = vec![0usize; 4];
-    let kinds = vec![ColumnKind::Varchar; 4];
-    let mut rc = RowContainer::with_kinds(&ks, &kinds, 8);
+    struct Arena {
+        chunks: Vec<(*mut u8, usize)>,
+        buf: *mut u8,
+        avail: usize,
+    }
+    impl Arena {
+        fn new() -> Self { Arena { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
+        fn allocate(&mut self, size: usize) -> *mut u8 {
+            if self.avail < size {
+                let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
+                    let last = self.chunks.last().unwrap().1;
+                    if last < 512*1024 { last * 2 } else { ((size + 512*1024 - 1) / (512*1024)) * 512*1024 }
+                });
+                let ptr = unsafe { libc::malloc(chunk_size) as *mut u8 };
+                self.chunks.push((ptr, chunk_size));
+                self.buf = ptr; self.avail = chunk_size;
+            }
+            let ret = self.buf;
+            self.buf = unsafe { self.buf.add(size) };
+            self.avail -= size;
+            ret
+        }
+    }
+    impl Drop for Arena {
+        fn drop(&mut self) { for &(p, _) in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } } }
+    }
+
+    let mut pool = Arena::new();
     let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut blocks: Vec<*const u8> = Vec::with_capacity(d.total_rows);
     for i in 0..d.total_rows {
@@ -221,7 +272,7 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
         for c in 0..num_cols {
             total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
         }
-        let block = rc.arena_alloc(total_size);
+        let block = pool.allocate(total_size);
         let mut wp = block;
         for c in 0..num_cols {
             let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
