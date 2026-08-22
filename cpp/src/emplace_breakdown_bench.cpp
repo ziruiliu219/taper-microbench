@@ -490,10 +490,13 @@ static uint64_t BenchAccumulate(const TestData& d) {
         taper::RowContainer::StoreValue<int64_t>(rows[i], aggOffset, 0);
     }
     uint64_t checksum = 0;
+    size_t idx = 0;
+    size_t numKeys = d.numKeys;
     for (size_t i = 0; i < d.totalRows; i++) {
-        int64_t* p = reinterpret_cast<int64_t*>(rows[i % d.numKeys] + aggOffset);
+        int64_t* p = reinterpret_cast<int64_t*>(rows[idx] + aggOffset);
         *p += d.values[i];
         checksum += static_cast<uint64_t>(*p);
+        if (++idx >= numKeys) idx = 0;
     }
     return checksum;
 }

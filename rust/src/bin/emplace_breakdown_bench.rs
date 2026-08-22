@@ -519,11 +519,15 @@ fn bench_accumulate(d: &TestData) -> u64 {
         rows.push(row);
     }
     let mut checksum: u64 = 0;
+    let mut idx = 0usize;
+    let num_keys = d.num_keys;
     for i in 0..d.total_rows {
-        let row = rows[i % d.num_keys];
+        let row = rows[idx];
         let p = unsafe { &mut *(row.add(agg_offset) as *mut i64) };
         *p += d.values[i];
         checksum = checksum.wrapping_add(*p as u64);
+        idx += 1;
+        if idx >= num_keys { idx = 0; }
     }
     checksum
 }
