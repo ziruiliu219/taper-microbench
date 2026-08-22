@@ -21,8 +21,17 @@ const DEFAULT_ITERS: usize = 10;
 
 fn hash_bytes(data: &[u8], seed: u64) -> u64 { xxh3_64_with_seed(data, seed) }
 
+/// Mirrors C++ VarcharSlice { ptr, len } — 16 bytes, same layout
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Slice {
+    ptr: *const u8,
+    len: usize,
+}
+
 struct TestData {
     str_cols: Vec<Vec<Vec<u8>>>,
+    slices: Vec<Vec<Slice>>,  // pre-computed (ptr, len) pairs — same as C++
     hashes: Vec<u64>,
     values: Vec<i64>,
     total_rows: usize,
@@ -62,7 +71,12 @@ fn gen_data(sel: f64, ht_size: usize, load_factor: f64) -> TestData {
     let min_slots = ((distinct_keys as f64 / 0.85) as usize).max(8);
     let num_chunks = ((min_slots + 7) / 8).next_power_of_two();
 
-    TestData { str_cols, hashes: all_hashes, values, total_rows, num_keys, num_chunks }
+    // Pre-compute slices (ptr, len) — same layout as C++ vector<vector<VarcharSlice>>
+    let slices: Vec<Vec<Slice>> = (0..NUM_STR_COLS)
+        .map(|c| str_cols[c].iter().map(|s| Slice { ptr: s.as_ptr(), len: s.len() }).collect())
+        .collect();
+
+    TestData { str_cols, slices, hashes: all_hashes, values, total_rows, num_keys, num_chunks }
 }
 
 // ─── Steps ───────────────────────────────────────────────────────
@@ -166,14 +180,12 @@ fn bench_serialize_key(d: &TestData) -> u64 {
     for i in 0..d.total_rows {
         let mut total_size = 0usize;
         for c in 0..num_cols {
-            let s = &d.str_cols[c][i];
-            total_size += 1 + compute_row_len_size(s.len()) as usize + s.len();
+            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
         }
         let block = rc.arena_alloc(total_size);
         let mut wp = block;
         for c in 0..num_cols {
-            let s = &d.str_cols[c][i];
-            let written = serialize_varchar_to_buffer(wp, s.as_slice());
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
             wp = unsafe { wp.add(written) };
         }
         checksum = checksum.wrapping_add(block as u64);
@@ -207,14 +219,12 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
     for i in 0..d.total_rows {
         let mut total_size = 0usize;
         for c in 0..num_cols {
-            let s = &d.str_cols[c][i];
-            total_size += 1 + compute_row_len_size(s.len()) as usize + s.len();
+            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
         }
         let block = rc.arena_alloc(total_size);
         let mut wp = block;
         for c in 0..num_cols {
-            let s = &d.str_cols[c][i];
-            let written = serialize_varchar_to_buffer(wp, s.as_slice());
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
             wp = unsafe { wp.add(written) };
         }
         blocks.push(block as *const u8);
@@ -224,8 +234,8 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
         let mut pos = blocks[i];
         let mut ok = true;
         for c in 0..num_cols {
-            let s = &d.str_cols[c][i];
-            if !compare_varchar_from_row(pos, s.as_slice()) { ok = false; break; }
+            let s = unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) };
+            if !compare_varchar_from_row(pos, s) { ok = false; break; }
             let entry_size = compute_varchar_serialized_size(pos);
             pos = unsafe { pos.add(entry_size) };
         }
