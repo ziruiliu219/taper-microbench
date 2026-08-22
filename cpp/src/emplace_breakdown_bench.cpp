@@ -199,23 +199,21 @@ static uint64_t BenchNewRow(const TestData& d) {
 }
 
 // 7. Serialize key (4 varchar)
-__attribute__((noinline, flatten))
+__attribute__((noinline))
 static uint64_t BenchSerializeKey(const TestData& d) {
     taper::SimpleArenaAllocator pool;
     uint64_t checksum = 0;
+    volatile size_t numCols = NUM_STR_COLS; // prevent unrolling (like Rust black_box)
     for (size_t i = 0; i < d.totalRows; i++) {
-        size_t len0 = d.slices[0][i].len, len1 = d.slices[1][i].len;
-        size_t len2 = d.slices[2][i].len, len3 = d.slices[3][i].len;
-        size_t totalSize = (1 + taper::ComputeRowLenSize(len0) + len0)
-                         + (1 + taper::ComputeRowLenSize(len1) + len1)
-                         + (1 + taper::ComputeRowLenSize(len2) + len2)
-                         + (1 + taper::ComputeRowLenSize(len3) + len3);
+        size_t totalSize = 0;
+        for (size_t c = 0; c < numCols; c++) {
+            totalSize += 1 + taper::ComputeRowLenSize(d.slices[c][i].len) + d.slices[c][i].len;
+        }
         uint8_t* block = pool.Allocate(static_cast<int64_t>(totalSize));
         uint8_t* wp = block;
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[0][i].ptr, len0);
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[1][i].ptr, len1);
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[2][i].ptr, len2);
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[3][i].ptr, len3);
+        for (size_t c = 0; c < numCols; c++) {
+            wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+        }
         checksum += reinterpret_cast<uint64_t>(block);
     }
     return checksum;
@@ -240,36 +238,34 @@ static uint64_t BenchStoreValue(const TestData& d) {
 }
 
 // 9. Compare varchar (4 cols, pre-serialized, 100% match)
-__attribute__((noinline, flatten))
+__attribute__((noinline))
 static uint64_t BenchCompareVarchar(const TestData& d) {
     taper::SimpleArenaAllocator pool;
+    volatile size_t numCols = NUM_STR_COLS;
     std::vector<const uint8_t*> blocks(d.totalRows);
     for (size_t i = 0; i < d.totalRows; i++) {
-        size_t len0 = d.slices[0][i].len, len1 = d.slices[1][i].len;
-        size_t len2 = d.slices[2][i].len, len3 = d.slices[3][i].len;
-        size_t totalSize = (1 + taper::ComputeRowLenSize(len0) + len0)
-                         + (1 + taper::ComputeRowLenSize(len1) + len1)
-                         + (1 + taper::ComputeRowLenSize(len2) + len2)
-                         + (1 + taper::ComputeRowLenSize(len3) + len3);
+        size_t totalSize = 0;
+        for (size_t c = 0; c < numCols; c++) {
+            totalSize += 1 + taper::ComputeRowLenSize(d.slices[c][i].len) + d.slices[c][i].len;
+        }
         uint8_t* block = pool.Allocate(static_cast<int64_t>(totalSize));
         uint8_t* wp = block;
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[0][i].ptr, len0);
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[1][i].ptr, len1);
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[2][i].ptr, len2);
-        wp += taper::SerializeVarcharToBuffer(wp, d.slices[3][i].ptr, len3);
+        for (size_t c = 0; c < numCols; c++) {
+            wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+        }
         blocks[i] = block;
     }
     uint64_t match_count = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
         const uint8_t* pos = blocks[i];
-        if (!taper::CompareVarcharFromRow(pos, d.slices[0][i].ptr, d.slices[0][i].len)) continue;
-        pos += taper::ComputeVarCharSerializedSize(pos);
-        if (!taper::CompareVarcharFromRow(pos, d.slices[1][i].ptr, d.slices[1][i].len)) continue;
-        pos += taper::ComputeVarCharSerializedSize(pos);
-        if (!taper::CompareVarcharFromRow(pos, d.slices[2][i].ptr, d.slices[2][i].len)) continue;
-        pos += taper::ComputeVarCharSerializedSize(pos);
-        if (!taper::CompareVarcharFromRow(pos, d.slices[3][i].ptr, d.slices[3][i].len)) continue;
-        match_count++;
+        bool all_match = true;
+        for (size_t c = 0; c < numCols; c++) {
+            if (!taper::CompareVarcharFromRow(pos, d.slices[c][i].ptr, d.slices[c][i].len)) {
+                all_match = false; break;
+            }
+            pos += taper::ComputeVarCharSerializedSize(pos);
+        }
+        if (all_match) match_count++;
     }
     return match_count;
 }
