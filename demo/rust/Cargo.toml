@@ -11,5 +11,9 @@ path = "src/main.rs"
 name = "rust_serialize_arena_demo"
 path = "src/arena_demo.rs"
 
+[[bin]]
+name = "rust_level3_demo"
+path = "src/level3_demo.rs"
+
 [dependencies]
 libc = "0.2"
