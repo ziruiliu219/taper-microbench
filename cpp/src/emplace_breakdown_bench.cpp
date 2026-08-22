@@ -267,22 +267,25 @@ static uint64_t BenchNewRow(const TestData& d) {
     return checksum;
 }
 
-// 7. Serialize key (4 varchar)
+// 7. Serialize key (4 varchar) — matches FULL pipeline's StoreKeyOneRow access pattern
+//    Accesses: cols[c].vcSlices[rowIdx] (one flat VarcharSlice* per column, indexed by row)
 __attribute__((noinline))
 static uint64_t BenchSerializeKey(const TestData& d) {
     taper::SimpleArenaAllocator pool;
     uint64_t checksum = 0;
-    size_t numCols = NUM_STR_COLS;
-    asm volatile("" : "+r"(numCols)); // black_box equivalent: prevent constant propagation without volatile side effects
+    // Build ColumnInput array (same as FULL pipeline does per-batch)
+    std::vector<const taper::VarcharSlice*> colPtrs(NUM_STR_COLS);
+    for (size_t c = 0; c < NUM_STR_COLS; c++) colPtrs[c] = d.slices[c].data();
+
     for (size_t i = 0; i < d.totalRows; i++) {
         size_t totalSize = 0;
-        for (size_t c = 0; c < numCols; c++) {
-            totalSize += 1 + taper::ComputeRowLenSize(d.slices[c][i].len) + d.slices[c][i].len;
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            totalSize += 1 + taper::ComputeRowLenSize(colPtrs[c][i].len) + colPtrs[c][i].len;
         }
         uint8_t* block = pool.Allocate(static_cast<int64_t>(totalSize));
         uint8_t* wp = block;
-        for (size_t c = 0; c < numCols; c++) {
-            wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            wp += taper::SerializeVarcharToBuffer(wp, colPtrs[c][i].ptr, colPtrs[c][i].len);
         }
         checksum += reinterpret_cast<uint64_t>(block);
     }
@@ -383,27 +386,31 @@ static uint64_t BenchStoreValue(const TestData& d) {
 __attribute__((noinline))
 static uint64_t BenchCompareVarchar(const TestData& d) {
     taper::SimpleArenaAllocator pool;
-    size_t numCols = NUM_STR_COLS;
-    asm volatile("" : "+r"(numCols));
+    // Build ColumnInput array (same as FULL pipeline)
+    std::vector<const taper::VarcharSlice*> colPtrs(NUM_STR_COLS);
+    for (size_t c = 0; c < NUM_STR_COLS; c++) colPtrs[c] = d.slices[c].data();
+
+    // Pre-serialize all rows (using flat access)
     std::vector<const uint8_t*> blocks(d.totalRows);
     for (size_t i = 0; i < d.totalRows; i++) {
         size_t totalSize = 0;
-        for (size_t c = 0; c < numCols; c++) {
-            totalSize += 1 + taper::ComputeRowLenSize(d.slices[c][i].len) + d.slices[c][i].len;
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            totalSize += 1 + taper::ComputeRowLenSize(colPtrs[c][i].len) + colPtrs[c][i].len;
         }
         uint8_t* block = pool.Allocate(static_cast<int64_t>(totalSize));
         uint8_t* wp = block;
-        for (size_t c = 0; c < numCols; c++) {
-            wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            wp += taper::SerializeVarcharToBuffer(wp, colPtrs[c][i].ptr, colPtrs[c][i].len);
         }
         blocks[i] = block;
     }
+    // Compare (matching FULL pipeline's BatchCompareVarcharDecoded access pattern)
     uint64_t match_count = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
         const uint8_t* pos = blocks[i];
         bool all_match = true;
-        for (size_t c = 0; c < numCols; c++) {
-            if (!taper::CompareVarcharFromRow(pos, d.slices[c][i].ptr, d.slices[c][i].len)) {
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            if (!taper::CompareVarcharFromRow(pos, colPtrs[c][i].ptr, colPtrs[c][i].len)) {
                 all_match = false; break;
             }
             pos += taper::ComputeVarCharSerializedSize(pos);

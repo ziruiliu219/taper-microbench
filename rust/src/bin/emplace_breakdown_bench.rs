@@ -284,15 +284,19 @@ fn bench_serialize_key(d: &TestData) -> u64 {
     let mut pool = SimpleArenaAllocator::new();
     let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut checksum: u64 = 0;
+    // Use flat column pointers (same as FULL pipeline's ColumnInput access pattern)
+    let col_ptrs: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| d.slices[c].as_ptr()).collect();
     for i in 0..d.total_rows {
         let mut total_size = 0usize;
         for c in 0..num_cols {
-            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
+            let s = unsafe { &*col_ptrs[c].add(i) };
+            total_size += 1 + compute_row_len_size(s.len) as usize + s.len;
         }
         let block = pool.allocate(total_size);
         let mut wp = block;
         for c in 0..num_cols {
-            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
+            let s = unsafe { &*col_ptrs[c].add(i) };
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
             wp = unsafe { wp.add(written) };
         }
         checksum = checksum.wrapping_add(block as u64);
@@ -498,16 +502,20 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
 
     let mut pool = SimpleArenaAllocator::new();
     let num_cols = std::hint::black_box(NUM_STR_COLS);
+    // Use flat column pointers (same as FULL pipeline)
+    let col_ptrs: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| d.slices[c].as_ptr()).collect();
     let mut blocks: Vec<*const u8> = Vec::with_capacity(d.total_rows);
     for i in 0..d.total_rows {
         let mut total_size = 0usize;
         for c in 0..num_cols {
-            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
+            let s = unsafe { &*col_ptrs[c].add(i) };
+            total_size += 1 + compute_row_len_size(s.len) as usize + s.len;
         }
         let block = pool.allocate(total_size);
         let mut wp = block;
         for c in 0..num_cols {
-            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
+            let s = unsafe { &*col_ptrs[c].add(i) };
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
             wp = unsafe { wp.add(written) };
         }
         blocks.push(block as *const u8);
@@ -517,8 +525,8 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
         let mut pos = blocks[i];
         let mut ok = true;
         for c in 0..num_cols {
-            let s = unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) };
-            if !compare_varchar_from_row(pos, s) { ok = false; break; }
+            let s = unsafe { &*col_ptrs[c].add(i) };
+            if !compare_varchar_from_row(pos, unsafe { std::slice::from_raw_parts(s.ptr, s.len) }) { ok = false; break; }
             let entry_size = compute_varchar_serialized_size(pos);
             pos = unsafe { pos.add(entry_size) };
         }
