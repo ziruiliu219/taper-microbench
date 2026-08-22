@@ -255,7 +255,8 @@ __attribute__((noinline))
 static uint64_t BenchSerializeKey(const TestData& d) {
     taper::SimpleArenaAllocator pool;
     uint64_t checksum = 0;
-    volatile size_t numCols = NUM_STR_COLS; // prevent unrolling (like Rust black_box)
+    size_t numCols = NUM_STR_COLS;
+    asm volatile("" : "+r"(numCols)); // black_box equivalent: prevent constant propagation without volatile side effects
     for (size_t i = 0; i < d.totalRows; i++) {
         size_t totalSize = 0;
         for (size_t c = 0; c < numCols; c++) {
@@ -293,7 +294,8 @@ static uint64_t BenchStoreValue(const TestData& d) {
 __attribute__((noinline))
 static uint64_t BenchCompareVarchar(const TestData& d) {
     taper::SimpleArenaAllocator pool;
-    volatile size_t numCols = NUM_STR_COLS;
+    size_t numCols = NUM_STR_COLS;
+    asm volatile("" : "+r"(numCols));
     std::vector<const uint8_t*> blocks(d.totalRows);
     for (size_t i = 0; i < d.totalRows; i++) {
         size_t totalSize = 0;
