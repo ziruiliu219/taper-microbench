@@ -290,7 +290,7 @@ static uint64_t BenchSerializeKey(const TestData& d) {
 }
 
 // 7a. Serialize with pre-allocated buffer (isolate pure serialize, no allocator cost)
-__attribute__((noinline))
+__attribute__((noinline, aligned(64)))
 static uint64_t BenchSerializePrealloc(const TestData& d) {
     // Pre-allocate one big buffer — no malloc during timing
     size_t maxPerRow = 4 * (1 + 4 + 30); // worst case: 4 cols × (1 + 4 + max_str_len ~30)
@@ -314,7 +314,7 @@ static uint64_t BenchSerializePrealloc(const TestData& d) {
 }
 
 // 7b. Just memcpy the data bytes (no header, no rowLenSize — pure memcpy cost)
-__attribute__((noinline))
+__attribute__((noinline, aligned(64)))
 static uint64_t BenchMemcpyOnly(const TestData& d) {
     size_t maxPerRow = 4 * 30;
     size_t bufSize = d.totalRows * maxPerRow;
@@ -337,7 +337,7 @@ static uint64_t BenchMemcpyOnly(const TestData& d) {
 }
 
 // 7c. memcpy with flat array (eliminate vector-of-vector indirection)
-__attribute__((noinline))
+__attribute__((noinline, aligned(64)))
 static uint64_t BenchMemcpyFlat(const TestData& d) {
     size_t maxPerRow = 4 * 30;
     size_t bufSize = d.totalRows * maxPerRow;
