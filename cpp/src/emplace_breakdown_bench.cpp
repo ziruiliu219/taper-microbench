@@ -445,23 +445,31 @@ static uint64_t BenchCompareVarchar(const TestData& d) {
         );
     }
 
-    // Second pass: compare all rows against their groups (same as GetUnequalsNumWithDecode)
+    // Second pass: compare all rows against their groups (batch-driven, same as FULL pipeline)
     uint64_t match_count = 0;
-    int32_t colOffset = rc.ColumnAt(0).Offset(); // varchar slot is at col 0
-    for (size_t i = 0; i < d.totalRows; i++) {
-        if (!groups[i]) continue;
-        const uint8_t* arenaPtr;
-        memcpy(&arenaPtr, reinterpret_cast<const char*>(groups[i]) + colOffset, sizeof(arenaPtr));
-        if (!arenaPtr) continue;
-        const uint8_t* pos = arenaPtr;
-        bool all_match = true;
-        for (size_t c = 0; c < NUM_STR_COLS; c++) {
-            if (!taper::CompareVarcharFromRow(pos, d.slices[c][i].ptr, d.slices[c][i].len)) {
-                all_match = false; break;
+    int32_t colOffset = rc.ColumnAt(0).Offset();
+    for (size_t batch = 0; batch < numBatches; batch++) {
+        size_t start = batch * BATCH_SIZE;
+        size_t end = std::min(start + BATCH_SIZE, d.totalRows);
+        const taper::VarcharSlice* batchColSlices[NUM_STR_COLS];
+        for (size_t c = 0; c < NUM_STR_COLS; c++) batchColSlices[c] = d.slices[c].data() + start;
+
+        for (size_t ri = 0; ri < end - start; ri++) {
+            size_t i = start + ri;
+            if (!groups[i]) continue;
+            const uint8_t* arenaPtr;
+            memcpy(&arenaPtr, reinterpret_cast<const char*>(groups[i]) + colOffset, sizeof(arenaPtr));
+            if (!arenaPtr) continue;
+            const uint8_t* pos = arenaPtr;
+            bool all_match = true;
+            for (size_t c = 0; c < NUM_STR_COLS; c++) {
+                if (!taper::CompareVarcharFromRow(pos, batchColSlices[c][ri].ptr, batchColSlices[c][ri].len)) {
+                    all_match = false; break;
+                }
+                pos += taper::ComputeVarCharSerializedSize(pos);
             }
-            pos += taper::ComputeVarCharSerializedSize(pos);
+            if (all_match) match_count++;
         }
-        if (all_match) match_count++;
     }
     return match_count;
 }
