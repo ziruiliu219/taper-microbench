@@ -10,6 +10,8 @@ use taper_hashmap::column_marshaller::{
 };
 use taper_hashmap::row_container::{RowContainer, ColumnKind};
 use taper_hashmap::taper_hashmap::TaperHashMap;
+use taper_hashmap::bitmask::BitMask;
+use taper_hashmap::chunk::Chunk;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 use rand_mt::Mt19937GenRand64;
 
@@ -83,31 +85,11 @@ fn gen_data(sel: f64, ht_size: usize, load_factor: f64) -> TestData {
 
 #[inline(never)]
 fn bench_hash_and_position(d: &TestData) -> u64 {
-    let mask = d.num_chunks - 1;
+    let table = TaperHashMap::with_capacity(d.num_chunks);
     let mut checksum: u64 = 0;
     for i in 0..d.total_rows {
-        let hv = d.hashes[i];
-        let pos = (hv >> 7) as usize & mask;
-        checksum = checksum.wrapping_add(pos as u64);
-    }
-    checksum
-}
-
-#[inline(never)]
-fn bench_prefetch(d: &TestData) -> u64 {
-    let mask = d.num_chunks - 1;
-    let fake_chunks: Vec<u8> = vec![0u8; d.num_chunks * 128];
-    let mut checksum: u64 = 0;
-    for i in 0..d.total_rows {
-        let hv = d.hashes[i];
-        let pos = (hv >> 7) as usize & mask;
-        unsafe {
-            let p = fake_chunks.as_ptr().add(pos * 128);
-            #[cfg(target_arch = "aarch64")]
-            std::arch::asm!("prfm pldl1keep, [{x}]", x = in(reg) p, options(readonly, nostack));
-            #[cfg(not(target_arch = "aarch64"))]
-            { let _ = std::ptr::read_volatile(p); }
-        }
+        let hv = TaperHashMap::bench_hash(d.hashes[i]);
+        let pos = table.bench_chunk_pos(hv);
         checksum = checksum.wrapping_add(pos as u64);
     }
     checksum
@@ -115,13 +97,12 @@ fn bench_prefetch(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_load_tags(d: &TestData) -> u64 {
-    let mask = d.num_chunks - 1;
-    let tags: Vec<u64> = vec![0x8080808080808080u64; d.num_chunks];
+    let table = TaperHashMap::with_capacity(d.num_chunks);
     let mut checksum: u64 = 0;
     for i in 0..d.total_rows {
-        let hv = d.hashes[i];
-        let pos = (hv >> 7) as usize & mask;
-        let t = tags[pos];
+        let hv = TaperHashMap::bench_hash(d.hashes[i]);
+        let pos = table.bench_chunk_pos(hv);
+        let t = table.bench_chunk_at(pos).tags_u64();
         checksum = checksum.wrapping_add(t);
     }
     checksum
@@ -129,30 +110,45 @@ fn bench_load_tags(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_match_tag(d: &TestData) -> u64 {
-    let mask = d.num_chunks - 1;
-    let tags: Vec<u64> = vec![0x8080808080808080u64; d.num_chunks];
+    let table = TaperHashMap::with_capacity(d.num_chunks);
     let mut checksum: u64 = 0;
     for i in 0..d.total_rows {
-        let hv = d.hashes[i];
-        let pos = (hv >> 7) as usize & mask;
+        let hv = TaperHashMap::bench_hash(d.hashes[i]);
+        let pos = table.bench_chunk_pos(hv);
         let tag_hash = ((hv >> 16) & 0x7F) as u8;
-        let t = tags[pos];
-        let tag_broadcast = 0x0101010101010101u64.wrapping_mul(tag_hash as u64);
-        let xored = t ^ tag_broadcast;
-        let matched = !((((xored) & 0x7F7F7F7F7F7F7F7Fu64).wrapping_add(0x7F7F7F7F7F7F7F7Fu64)) | xored | 0x7F7F7F7F7F7F7F7Fu64);
-        checksum = checksum.wrapping_add(matched);
+        let tags = table.bench_chunk_at(pos).tags_u64();
+        for slot in BitMask::match_tag(tags, tag_hash) {
+            checksum = checksum.wrapping_add(slot as u64);
+        }
     }
     checksum
 }
 
 #[inline(never)]
 fn bench_compare_key_hash(d: &TestData) -> u64 {
-    let stored_keys: Vec<u64> = (0..d.num_keys).map(|i| d.hashes[i]).collect();
+    // Build a real hashmap
+    let mut table = TaperHashMap::with_capacity(d.num_chunks);
+    let build_hashes = &d.hashes[..d.num_keys];
+    table.emplace_batch(build_hashes,
+        |_, _| false,
+        |_, _| {},
+        |_, _, _| {},
+    );
+    // Probe: for each row, find chunk, compare key
     let mut match_count: u64 = 0;
     for i in 0..d.total_rows {
-        let key = d.hashes[i];
-        let stored = stored_keys[i % d.num_keys];
-        if key == stored { match_count += 1; }
+        let hv = TaperHashMap::bench_hash(d.hashes[i]);
+        let pos = table.bench_chunk_pos(hv);
+        let tag_hash = ((hv >> 16) & 0x7F) as u8;
+        let chunk = table.bench_chunk_at(pos);
+        let tags = chunk.tags_u64();
+        for slot in BitMask::match_tag(tags, tag_hash) {
+            let slot_idx = slot as usize;
+            if chunk.keys[slot_idx] == hv {
+                match_count += 1;
+                break;
+            }
+        }
     }
     match_count
 }
@@ -408,7 +404,6 @@ fn main() {
     println!("=== Rust EmplaceBatch Breakdown (ht={}, lf={:.2}, sel={:.2}, {} iters, {} rows) ===",
              ht_size, load_factor, sel, num_iters, data.total_rows);
     if should_run("1") { bench("1. hash_and_position", bench_hash_and_position); }
-    if should_run("2") { bench("2. prefetch", bench_prefetch); }
     if should_run("3") { bench("3. load_tags", bench_load_tags); }
     if should_run("4") { bench("4. match_tag_swar", bench_match_tag); }
     if should_run("5") { bench("5. compare_key_hash", bench_compare_key_hash); }

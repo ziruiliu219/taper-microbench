@@ -83,6 +83,14 @@ impl TaperHashMap {
         self.num_chunks
     }
 
+    // ─── Bench helpers (expose internals for micro benchmarks) ───
+    #[inline(always)]
+    pub fn bench_hash(key: u64) -> u64 { key } // KeyScattered = identity
+    #[inline(always)]
+    pub fn bench_chunk_pos(&self, hash: u64) -> usize { self.chunk_pos(hash) }
+    #[inline(always)]
+    pub fn bench_chunk_at(&self, pos: usize) -> &Chunk { unsafe { &*self.chunks.add(pos) } }
+
     #[inline(always)]
     fn should_expand(&self) -> bool {
         self.size as f64 >= self.capacity() as f64 * LOAD_FACTOR_THRESHOLD
