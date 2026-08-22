@@ -120,9 +120,13 @@ pub fn compute_varchar_serialized_size(data: *const u8) -> usize {
 /// Compare varchar stored in arena format against input bytes. Returns true if equal.
 /// Mirrors C++ `TaperColumnSerializeHandler::CompareVarcharFromRow`:
 ///   return memcmp(rowDataPtr, sv.data(), stringLen) == 0;
-/// Uses slice equality which compiles to memcmp — identical to OmniOperator.
+/// Forces real memcmp@plt call (prevents LLVM from optimizing to bcmp).
 #[inline]
 pub fn compare_varchar_from_row(arena_ptr: *const u8, input: &[u8]) -> bool {
+    // Use function pointer to prevent LLVM from recognizing memcmp == 0 → bcmp optimization
+    let memcmp_fn: unsafe extern "C" fn(*const libc::c_void, *const libc::c_void, usize) -> i32 = libc::memcmp;
+    let memcmp_ptr = std::hint::black_box(memcmp_fn);
+
     unsafe {
         let row_len_size = *arena_ptr;
         let string_len: usize = match row_len_size {
@@ -134,8 +138,7 @@ pub fn compare_varchar_from_row(arena_ptr: *const u8, input: &[u8]) -> bool {
         if string_len != input.len() { return false; }
         if string_len == 0 { return true; }
         let data_ptr = arena_ptr.add(1 + row_len_size as usize);
-        // Use libc::memcmp to match C++ codegen exactly (bl memcmp@plt)
-        libc::memcmp(
+        memcmp_ptr(
             data_ptr as *const libc::c_void,
             input.as_ptr() as *const libc::c_void,
             string_len,
