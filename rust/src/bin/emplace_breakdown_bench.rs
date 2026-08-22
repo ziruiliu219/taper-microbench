@@ -298,17 +298,24 @@ fn main() {
         println!("{:<30}  {:7.2} ms  checksum={}", name, per_iter, checksum);
     };
 
+    // Optional stage filter: argv[5] = "5" or "7" or "9" etc.
+    let stage_filter: String = args.get(5).cloned().unwrap_or_default();
+    let should_run = |name: &str| -> bool {
+        if stage_filter.is_empty() { return true; }
+        stage_filter.contains(&name[..1]) || stage_filter.contains(name)
+    };
+
     println!("=== Rust EmplaceBatch Breakdown (ht={}, lf={:.2}, sel={:.2}, {} iters, {} rows) ===",
              ht_size, load_factor, sel, num_iters, data.total_rows);
-    bench("1. hash_and_position", bench_hash_and_position);
-    bench("2. prefetch", bench_prefetch);
-    bench("3. load_tags", bench_load_tags);
-    bench("4. match_tag_swar", bench_match_tag);
-    bench("5. compare_key_hash", bench_compare_key_hash);
-    bench("6. new_row", bench_new_row);
-    bench("7. serialize_key_4col", bench_serialize_key);
-    bench("8. store_value_i64", bench_store_value);
-    bench("9. compare_varchar_4col", bench_compare_varchar);
-    bench("10. accumulate", bench_accumulate);
-    bench("FULL: pipeline", bench_full_pipeline);
+    if should_run("1") { bench("1. hash_and_position", bench_hash_and_position); }
+    if should_run("2") { bench("2. prefetch", bench_prefetch); }
+    if should_run("3") { bench("3. load_tags", bench_load_tags); }
+    if should_run("4") { bench("4. match_tag_swar", bench_match_tag); }
+    if should_run("5") { bench("5. compare_key_hash", bench_compare_key_hash); }
+    if should_run("6") { bench("6. new_row", bench_new_row); }
+    if should_run("7") { bench("7. serialize_key_4col", bench_serialize_key); }
+    if should_run("8") { bench("8. store_value_i64", bench_store_value); }
+    if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
+    if should_run("10") { bench("10. accumulate", bench_accumulate); }
+    if should_run("F") || should_run("11") { bench("FULL: pipeline", bench_full_pipeline); }
 }

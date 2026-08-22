@@ -340,19 +340,29 @@ int main(int argc, char** argv) {
         printf("%-30s  %7.2f ms  checksum=%lu\n", name, per_iter, (unsigned long)checksum);
     };
 
+    // Optional stage filter: argv[5] = "5" or "7" or "9" or "5,7,9" or "FULL"
+    std::string stageFilter = "";
+    if (argc > 5) stageFilter = argv[5];
+
+    auto shouldRun = [&](const char* name) {
+        if (stageFilter.empty()) return true;
+        return stageFilter.find(std::string(name).substr(0, stageFilter.size())) != std::string::npos
+            || stageFilter.find(name) != std::string::npos;
+    };
+
     printf("=== C++ EmplaceBatch Breakdown (ht=%zu, lf=%.2f, sel=%.2f, %zu iters, %zu rows) ===\n",
            G_HT_SIZE, G_LOAD_FACTOR, sel, numIters, data.totalRows);
-    bench("1. hash_and_position", BenchHashAndPosition);
-    bench("2. prefetch", BenchPrefetch);
-    bench("3. load_tags", BenchLoadTags);
-    bench("4. match_tag_swar", BenchMatchTag);
-    bench("5. compare_key_hash", BenchCompareKeyHash);
-    bench("6. new_row", BenchNewRow);
-    bench("7. serialize_key_4col", BenchSerializeKey);
-    bench("8. store_value_i64", BenchStoreValue);
-    bench("9. compare_varchar_4col", BenchCompareVarchar);
-    bench("10. accumulate", BenchAccumulate);
-    bench("FULL: pipeline", BenchFullPipeline);
+    if (shouldRun("1")) bench("1. hash_and_position", BenchHashAndPosition);
+    if (shouldRun("2")) bench("2. prefetch", BenchPrefetch);
+    if (shouldRun("3")) bench("3. load_tags", BenchLoadTags);
+    if (shouldRun("4")) bench("4. match_tag_swar", BenchMatchTag);
+    if (shouldRun("5")) bench("5. compare_key_hash", BenchCompareKeyHash);
+    if (shouldRun("6")) bench("6. new_row", BenchNewRow);
+    if (shouldRun("7")) bench("7. serialize_key_4col", BenchSerializeKey);
+    if (shouldRun("8")) bench("8. store_value_i64", BenchStoreValue);
+    if (shouldRun("9")) bench("9. compare_varchar_4col", BenchCompareVarchar);
+    if (shouldRun("10")) bench("10. accumulate", BenchAccumulate);
+    if (shouldRun("FULL") || shouldRun("11")) bench("FULL: pipeline", BenchFullPipeline);
 
     return 0;
 }
