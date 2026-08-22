@@ -283,6 +283,53 @@ fn bench_serialize_key(d: &TestData) -> u64 {
     checksum
 }
 
+/// 7a. Serialize with pre-allocated buffer (no allocator, no page faults)
+#[inline(never)]
+fn bench_serialize_prealloc(d: &TestData) -> u64 {
+    let max_per_row = 4 * (1 + 4 + 30); // worst case per row
+    let buf_size = d.total_rows * max_per_row;
+    let buf = unsafe { libc::malloc(buf_size) as *mut u8 };
+    unsafe { libc::memset(buf as *mut libc::c_void, 0, buf_size); } // touch all pages
+
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
+    let mut checksum: u64 = 0;
+    let mut wp = buf;
+    for i in 0..d.total_rows {
+        let row_start = wp;
+        for c in 0..num_cols {
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(d.slices[c][i].ptr, d.slices[c][i].len) });
+            wp = unsafe { wp.add(written) };
+        }
+        checksum = checksum.wrapping_add(row_start as u64);
+    }
+    unsafe { libc::free(buf as *mut libc::c_void); }
+    checksum
+}
+
+/// 7b. Just memcpy the data bytes (no header, no rowLenSize)
+#[inline(never)]
+fn bench_memcpy_only(d: &TestData) -> u64 {
+    let max_per_row = 4 * 30;
+    let buf_size = d.total_rows * max_per_row;
+    let buf = unsafe { libc::malloc(buf_size) as *mut u8 };
+    unsafe { libc::memset(buf as *mut libc::c_void, 0, buf_size); }
+
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
+    let mut checksum: u64 = 0;
+    let mut wp = buf;
+    for i in 0..d.total_rows {
+        for c in 0..num_cols {
+            unsafe {
+                libc::memcpy(wp as *mut libc::c_void, d.slices[c][i].ptr as *const libc::c_void, d.slices[c][i].len);
+                wp = wp.add(d.slices[c][i].len);
+            }
+        }
+        checksum = checksum.wrapping_add(wp as u64);
+    }
+    unsafe { libc::free(buf as *mut libc::c_void); }
+    checksum
+}
+
 /// Same as bench_serialize_key but uses noinline memcpy (forces PLT call like C++/GCC)
 #[inline(never)]
 fn bench_serialize_key_noinline(d: &TestData) -> u64 {
@@ -487,7 +534,9 @@ fn main() {
     if should_run("5") { bench("5. compare_key_hash", bench_compare_key_hash); }
     if should_run("6") { bench("6. new_row", bench_new_row); }
     if should_run("7") { bench("7. serialize_key_4col", bench_serialize_key); }
-    if should_run("7") { bench("7b.serialize_noinline_memcpy", bench_serialize_key_noinline); }
+    if should_run("7") { bench("7a.serialize_prealloc", bench_serialize_prealloc); }
+    if should_run("7") { bench("7b.memcpy_only", bench_memcpy_only); }
+    if should_run("7") { bench("7c.serialize_noinline_memcpy", bench_serialize_key_noinline); }
     if should_run("8") { bench("8. store_value_i64", bench_store_value); }
     if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
     if should_run("10") { bench("10. accumulate", bench_accumulate); }

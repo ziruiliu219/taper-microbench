@@ -272,6 +272,53 @@ static uint64_t BenchSerializeKey(const TestData& d) {
     return checksum;
 }
 
+// 7a. Serialize with pre-allocated buffer (isolate pure serialize, no allocator cost)
+__attribute__((noinline))
+static uint64_t BenchSerializePrealloc(const TestData& d) {
+    // Pre-allocate one big buffer — no malloc during timing
+    size_t maxPerRow = 4 * (1 + 4 + 30); // worst case: 4 cols × (1 + 4 + max_str_len ~30)
+    size_t bufSize = d.totalRows * maxPerRow;
+    uint8_t* buf = static_cast<uint8_t*>(malloc(bufSize));
+    memset(buf, 0, bufSize); // touch all pages upfront (eliminate page faults)
+
+    uint64_t checksum = 0;
+    size_t numCols = NUM_STR_COLS;
+    asm volatile("" : "+r"(numCols));
+    uint8_t* wp = buf;
+    for (size_t i = 0; i < d.totalRows; i++) {
+        uint8_t* rowStart = wp;
+        for (size_t c = 0; c < numCols; c++) {
+            wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+        }
+        checksum += reinterpret_cast<uint64_t>(rowStart);
+    }
+    free(buf);
+    return checksum;
+}
+
+// 7b. Just memcpy the data bytes (no header, no rowLenSize — pure memcpy cost)
+__attribute__((noinline))
+static uint64_t BenchMemcpyOnly(const TestData& d) {
+    size_t maxPerRow = 4 * 30;
+    size_t bufSize = d.totalRows * maxPerRow;
+    uint8_t* buf = static_cast<uint8_t*>(malloc(bufSize));
+    memset(buf, 0, bufSize);
+
+    uint64_t checksum = 0;
+    size_t numCols = NUM_STR_COLS;
+    asm volatile("" : "+r"(numCols));
+    uint8_t* wp = buf;
+    for (size_t i = 0; i < d.totalRows; i++) {
+        for (size_t c = 0; c < numCols; c++) {
+            memcpy(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+            wp += d.slices[c][i].len;
+        }
+        checksum += reinterpret_cast<uint64_t>(wp);
+    }
+    free(buf);
+    return checksum;
+}
+
 // 8. Store value
 __attribute__((noinline))
 static uint64_t BenchStoreValue(const TestData& d) {
@@ -407,6 +454,8 @@ int main(int argc, char** argv) {
     if (shouldRun("5")) bench("5. compare_key_hash", BenchCompareKeyHash);
     if (shouldRun("6")) bench("6. new_row", BenchNewRow);
     if (shouldRun("7")) bench("7. serialize_key_4col", BenchSerializeKey);
+    if (shouldRun("7")) bench("7a.serialize_prealloc", BenchSerializePrealloc);
+    if (shouldRun("7")) bench("7b.memcpy_only", BenchMemcpyOnly);
     if (shouldRun("8")) bench("8. store_value_i64", BenchStoreValue);
     if (shouldRun("9")) bench("9. compare_varchar_4col", BenchCompareVarchar);
     if (shouldRun("10")) bench("10. accumulate", BenchAccumulate);
