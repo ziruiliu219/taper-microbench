@@ -173,13 +173,14 @@ fn bench_new_row(d: &TestData) -> u64 {
 #[inline(never)]
 fn bench_serialize_key(d: &TestData) -> u64 {
     // Standalone arena — same as C++ SimpleArenaAllocator pool on stack
-    struct Arena {
+    // SimpleArenaAllocator — same as C++ taper::SimpleArenaAllocator
+    struct SimpleArenaAllocator {
         chunks: Vec<(*mut u8, usize)>,
         buf: *mut u8,
         avail: usize,
     }
-    impl Arena {
-        fn new() -> Self { Arena { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
+    impl SimpleArenaAllocator {
+        fn new() -> Self { SimpleArenaAllocator { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
         fn allocate(&mut self, size: usize) -> *mut u8 {
             if self.avail < size {
                 let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
@@ -196,11 +197,11 @@ fn bench_serialize_key(d: &TestData) -> u64 {
             ret
         }
     }
-    impl Drop for Arena {
+    impl Drop for SimpleArenaAllocator {
         fn drop(&mut self) { for &(p, _) in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } } }
     }
 
-    let mut pool = Arena::new();
+    let mut pool = SimpleArenaAllocator::new();
     let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut checksum: u64 = 0;
     for i in 0..d.total_rows {
@@ -237,13 +238,14 @@ fn bench_store_value(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_compare_varchar(d: &TestData) -> u64 {
-    struct Arena {
+    // SimpleArenaAllocator — same as C++ taper::SimpleArenaAllocator
+    struct SimpleArenaAllocator {
         chunks: Vec<(*mut u8, usize)>,
         buf: *mut u8,
         avail: usize,
     }
-    impl Arena {
-        fn new() -> Self { Arena { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
+    impl SimpleArenaAllocator {
+        fn new() -> Self { SimpleArenaAllocator { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
         fn allocate(&mut self, size: usize) -> *mut u8 {
             if self.avail < size {
                 let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
@@ -260,11 +262,11 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
             ret
         }
     }
-    impl Drop for Arena {
+    impl Drop for SimpleArenaAllocator {
         fn drop(&mut self) { for &(p, _) in &self.chunks { unsafe { libc::free(p as *mut libc::c_void); } } }
     }
 
-    let mut pool = Arena::new();
+    let mut pool = SimpleArenaAllocator::new();
     let num_cols = std::hint::black_box(NUM_STR_COLS);
     let mut blocks: Vec<*const u8> = Vec::with_capacity(d.total_rows);
     for i in 0..d.total_rows {
