@@ -627,7 +627,8 @@ fn main() {
     let stage_filter: String = args.get(4).cloned().unwrap_or_default();
     let should_run = |name: &str| -> bool {
         if stage_filter.is_empty() { return true; }
-        stage_filter.contains(&name[..1]) || stage_filter.contains(name)
+        // Match if filter appears anywhere in name, or name starts with filter
+        name.contains(&stage_filter[..]) || stage_filter.contains(&name[..stage_filter.len().min(name.len())])
     };
 
     println!("=== Rust EmplaceBatch Breakdown (ht={}, sel={:.2}, {} iters, {} rows) ===",
