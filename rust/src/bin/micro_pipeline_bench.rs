@@ -16,7 +16,6 @@ use rand_mt::Mt19937GenRand64;
 
 const NUM_STR_COLS: usize = 4;
 const HT_SIZE: usize = 16384;
-const LOAD_FACTOR: f64 = 0.50;
 const NUM_PROBE_ROWS: usize = 1_000_000;
 const BATCH_SIZE: usize = 410;
 const SEED: u64 = 42;
@@ -200,17 +199,20 @@ fn main() {
         num_iters = arg3.parse().unwrap_or(10);
     }
 
-    let num_keys = (HT_SIZE as f64 * LOAD_FACTOR) as usize;
-    let num_misses = NUM_PROBE_ROWS - (NUM_PROBE_ROWS as f64 * sel) as usize;
-    let distinct_keys = num_keys + num_misses;
-    let min_slots = ((distinct_keys as f64 / 0.85) as usize).max(8);
-    let num_chunks = ((min_slots + 7) / 8).next_power_of_two();
+    let num_chunks = (HT_SIZE / 8).max(1).next_power_of_two();
+    let capacity = num_chunks * 8;
+    let distinct_keys = ((capacity as f64 * 0.89) as usize).max(1);
+    let num_keys = ((distinct_keys as f64 * sel) as usize).max(1);
+    let probe_misses = distinct_keys - num_keys;
+    let probe_hits = if NUM_PROBE_ROWS > probe_misses { NUM_PROBE_ROWS - probe_misses } else { 0 };
+    let actual_sel = num_keys as f64 / distinct_keys as f64;
 
     eprintln!("=== Rust Pipeline Micro Bench ===");
-    eprintln!("sel={:.1}, iters={}, totalRows={}, numChunks={}", sel, num_iters, num_keys + NUM_PROBE_ROWS, num_chunks);
+    eprintln!("sel={:.1}, iters={}, numChunks={}, capacity={}", sel, num_iters, num_chunks, capacity);
+    eprintln!("distinctKeys={}, build={}, probeMisses={}, probeHits={}", distinct_keys, num_keys, probe_misses, probe_hits);
     if let Some(s) = stage_filter { eprintln!("Stage filter: {}", s); }
     eprintln!("\nGenerating data...");
-    let data = gen_data(num_keys, sel);
+    let data = gen_data(num_keys, actual_sel);
     eprintln!("Done.\n");
 
     let bench = |name: &str, tag: &str, f: fn(&BenchData, usize) -> usize| {

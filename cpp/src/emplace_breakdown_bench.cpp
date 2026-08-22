@@ -38,7 +38,6 @@ static constexpr uint64_t SEED = 42;
 static constexpr size_t DEFAULT_ITERS = 10;
 
 static size_t G_HT_SIZE = 16384;
-static double G_LOAD_FACTOR = 0.50;
 
 using Clock = std::chrono::high_resolution_clock;
 static double elapsed_ms(Clock::time_point t0, Clock::time_point t1) {
@@ -56,9 +55,39 @@ struct TestData {
 };
 
 static TestData GenData(double sel) {
-    size_t numKeys = static_cast<size_t>(G_HT_SIZE * G_LOAD_FACTOR);
+    // ─── Two params only: G_HT_SIZE (table slots) + sel (build/probe split) ───
+    // Table size fixed, fill to 89% (just under 90% expand threshold), no rehash.
+    size_t numChunks = G_HT_SIZE / 8;
+    if (numChunks < 1) numChunks = 1;
+    size_t nc = 1; while (nc < numChunks) nc <<= 1; numChunks = nc;
+    size_t capacity = numChunks * 8;
+
+    // Total distinct keys = 89% of capacity (max fill without expand)
+    size_t distinctKeys = static_cast<size_t>(capacity * 0.89);
+    if (distinctKeys < 1) distinctKeys = 1;
+
+    // sel controls how many distinct keys are inserted in the build phase vs probe phase:
+    //   numKeys = distinctKeys * sel        (inserted during build, before probe)
+    //   probeMisses = distinctKeys - numKeys (new keys encountered during probe)
+    //   probeHits = NUM_PROBE_ROWS - probeMisses (probe rows that hit existing keys)
+    size_t numKeys = static_cast<size_t>(distinctKeys * sel);
+    if (numKeys < 1) numKeys = 1;
+    size_t probeMisses = distinctKeys - numKeys;
+    size_t probeHits = (NUM_PROBE_ROWS > probeMisses) ? (NUM_PROBE_ROWS - probeMisses) : 0;
+    size_t numProbeRows = probeHits + probeMisses;
+
+    fprintf(stderr, "  sizing: numChunks=%zu, capacity=%zu, distinctKeys=%zu\n", numChunks, capacity, distinctKeys);
+    fprintf(stderr, "  build: numKeys=%zu (%.1f%% of capacity)\n", numKeys, 100.0*numKeys/capacity);
+    fprintf(stderr, "  probe: hits=%zu, misses=%zu, probeRows=%zu\n", probeHits, probeMisses, numProbeRows);
+    fprintf(stderr, "  final fill: %zu/%zu = %.1f%% (expand threshold=90%%)\n",
+            distinctKeys, capacity, 100.0*distinctKeys/capacity);
+
     std::mt19937_64 rng(SEED);
-    TestData d; d.numKeys = numKeys;
+    TestData d;
+    d.numKeys = numKeys;
+    d.numChunks = numChunks;
+
+    // Generate distinct key strings
     d.strCols.resize(NUM_STR_COLS);
     for (size_t c = 0; c < NUM_STR_COLS; c++) {
         d.strCols[c].resize(numKeys);
@@ -67,6 +96,8 @@ static TestData GenData(double sel) {
             d.strCols[c][i].assign(s.begin(), s.end());
         }
     }
+
+    // Compute hashes for base keys
     std::vector<int64_t> bh(numKeys);
     for (size_t i = 0; i < numKeys; i++) {
         uint64_t h = 0;
@@ -74,25 +105,56 @@ static TestData GenData(double sel) {
             h = HB(d.strCols[c][i].data(), d.strCols[c][i].size(), h);
         bh[i] = static_cast<int64_t>(h);
     }
-    size_t nH = static_cast<size_t>(NUM_PROBE_ROWS * sel), nM = NUM_PROBE_ROWS - nH;
+
+    // Generate probe rows: probeHits (from existing keys) + probeMisses (new keys)
     std::vector<std::vector<std::vector<uint8_t>>> ps(NUM_STR_COLS);
     std::vector<int64_t> ph;
-    for (size_t i = 0; i < nH; i++) { size_t idx = rng() % numKeys; for (size_t c = 0; c < NUM_STR_COLS; c++) ps[c].push_back(d.strCols[c][idx]); ph.push_back(bh[idx]); }
-    for (size_t i = 0; i < nM; i++) { uint64_t h = 0; for (size_t c = 0; c < NUM_STR_COLS; c++) { auto s = "miss_" + std::to_string(i) + "_" + std::to_string(c); std::vector<uint8_t> b(s.begin(), s.end()); h = HB(b.data(), b.size(), h); ps[c].push_back(std::move(b)); } ph.push_back(static_cast<int64_t>(h)); }
-    std::vector<size_t> ord(NUM_PROBE_ROWS); std::iota(ord.begin(), ord.end(), 0);
-    for (size_t i = NUM_PROBE_ROWS - 1; i > 0; i--) std::swap(ord[i], ord[rng() % (i + 1)]);
-    for (size_t c = 0; c < NUM_STR_COLS; c++) { auto tmp = std::move(ps[c]); ps[c].resize(NUM_PROBE_ROWS); for (size_t i = 0; i < NUM_PROBE_ROWS; i++) ps[c][i] = std::move(tmp[ord[i]]); }
-    { auto tmp = ph; for (size_t i = 0; i < NUM_PROBE_ROWS; i++) ph[i] = tmp[ord[i]]; }
-    d.totalRows = numKeys + NUM_PROBE_ROWS;
-    for (size_t c = 0; c < NUM_STR_COLS; c++) { d.strCols[c].reserve(d.totalRows); for (auto& v : ps[c]) d.strCols[c].push_back(std::move(v)); }
-    d.hashes = bh; d.hashes.insert(d.hashes.end(), ph.begin(), ph.end());
-    d.values.resize(d.totalRows); for (size_t i = 0; i < d.totalRows; i++) d.values[i] = i % 1000;
+    for (size_t i = 0; i < probeHits; i++) {
+        size_t idx = rng() % numKeys;
+        for (size_t c = 0; c < NUM_STR_COLS; c++) ps[c].push_back(d.strCols[c][idx]);
+        ph.push_back(bh[idx]);
+    }
+    for (size_t i = 0; i < probeMisses; i++) {
+        uint64_t h = 0;
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            auto s = "miss_" + std::to_string(i) + "_" + std::to_string(c);
+            std::vector<uint8_t> b(s.begin(), s.end());
+            h = HB(b.data(), b.size(), h);
+            ps[c].push_back(std::move(b));
+        }
+        ph.push_back(static_cast<int64_t>(h));
+    }
+
+    // Shuffle probe rows
+    std::vector<size_t> ord(numProbeRows);
+    std::iota(ord.begin(), ord.end(), 0);
+    for (size_t i = numProbeRows - 1; i > 0; i--) std::swap(ord[i], ord[rng() % (i + 1)]);
+    for (size_t c = 0; c < NUM_STR_COLS; c++) {
+        auto tmp = std::move(ps[c]); ps[c].resize(numProbeRows);
+        for (size_t i = 0; i < numProbeRows; i++) ps[c][i] = std::move(tmp[ord[i]]);
+    }
+    { auto tmp = ph; for (size_t i = 0; i < numProbeRows; i++) ph[i] = tmp[ord[i]]; }
+
+    // Combine: base keys first, then probe rows
+    d.totalRows = numKeys + numProbeRows;
+    for (size_t c = 0; c < NUM_STR_COLS; c++) {
+        d.strCols[c].reserve(d.totalRows);
+        for (auto& v : ps[c]) d.strCols[c].push_back(std::move(v));
+    }
+    d.hashes = bh;
+    d.hashes.insert(d.hashes.end(), ph.begin(), ph.end());
+    d.values.resize(d.totalRows);
+    for (size_t i = 0; i < d.totalRows; i++) d.values[i] = i % 1000;
+
+    // Build slices
     d.slices.resize(NUM_STR_COLS);
-    for (size_t c = 0; c < NUM_STR_COLS; c++) { d.slices[c].resize(d.totalRows); for (size_t i = 0; i < d.totalRows; i++) { d.slices[c][i].ptr = d.strCols[c][i].data(); d.slices[c][i].len = d.strCols[c][i].size(); } }
-    size_t numMisses = NUM_PROBE_ROWS - static_cast<size_t>(NUM_PROBE_ROWS * sel);
-    size_t distinctKeys = numKeys + numMisses;
-    size_t minSlots = std::max(static_cast<size_t>(distinctKeys / 0.85), size_t(8));
-    d.numChunks = 1; while (d.numChunks * 8 < minSlots) d.numChunks *= 2;
+    for (size_t c = 0; c < NUM_STR_COLS; c++) {
+        d.slices[c].resize(d.totalRows);
+        for (size_t i = 0; i < d.totalRows; i++) {
+            d.slices[c][i].ptr = d.strCols[c][i].data();
+            d.slices[c][i].len = d.strCols[c][i].size();
+        }
+    }
     return d;
 }
 
@@ -305,10 +367,9 @@ int main(int argc, char** argv) {
     if (argc > 1) sel = std::atof(argv[1]);
     if (argc > 2) numIters = static_cast<size_t>(std::atoi(argv[2]));
     if (argc > 3) G_HT_SIZE = static_cast<size_t>(std::atoi(argv[3]));
-    if (argc > 4) G_LOAD_FACTOR = std::atof(argv[4]);
 
     fprintf(stderr, "=== C++ EmplaceBatch Breakdown ===\n");
-    fprintf(stderr, "sel=%.2f, iters=%zu, ht=%zu, lf=%.2f\n", sel, numIters, G_HT_SIZE, G_LOAD_FACTOR);
+    fprintf(stderr, "sel=%.2f, iters=%zu, ht=%zu\n", sel, numIters, G_HT_SIZE);
     fprintf(stderr, "Generating data...\n");
     TestData data = GenData(sel);
     fprintf(stderr, "totalRows=%zu, numKeys=%zu, numChunks=%zu\n\n", data.totalRows, data.numKeys, data.numChunks);
@@ -323,9 +384,9 @@ int main(int argc, char** argv) {
         printf("%-30s  %7.2f ms  checksum=%lu\n", name, per_iter, (unsigned long)checksum);
     };
 
-    // Optional stage filter: argv[5] = "5" or "7" or "9" or "5,7,9" or "FULL"
+    // Optional stage filter: argv[4] = "5" or "7" or "9" or "5,7,9" or "FULL"
     std::string stageFilter = "";
-    if (argc > 5) stageFilter = argv[5];
+    if (argc > 4) stageFilter = argv[4];
 
     auto shouldRun = [&](const char* name) {
         if (stageFilter.empty()) return true;
@@ -333,8 +394,8 @@ int main(int argc, char** argv) {
             || stageFilter.find(name) != std::string::npos;
     };
 
-    printf("=== C++ EmplaceBatch Breakdown (ht=%zu, lf=%.2f, sel=%.2f, %zu iters, %zu rows) ===\n",
-           G_HT_SIZE, G_LOAD_FACTOR, sel, numIters, data.totalRows);
+    printf("=== C++ EmplaceBatch Breakdown (ht=%zu, sel=%.2f, %zu iters, %zu rows) ===\n",
+           G_HT_SIZE, sel, numIters, data.totalRows);
     if (shouldRun("1")) bench("1. hash_and_position", BenchHashAndPosition);
     if (shouldRun("3")) bench("3. load_tags", BenchLoadTags);
     if (shouldRun("4")) bench("4. match_tag_swar", BenchMatchTag);

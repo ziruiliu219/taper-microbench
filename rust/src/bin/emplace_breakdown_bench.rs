@@ -41,8 +41,26 @@ struct TestData {
     num_chunks: usize,
 }
 
-fn gen_data(sel: f64, ht_size: usize, load_factor: f64) -> TestData {
-    let num_keys = (ht_size as f64 * load_factor) as usize;
+fn gen_data(sel: f64, ht_size: usize) -> TestData {
+    // ─── Two params only: ht_size + sel ───
+    let num_chunks = (ht_size / 8).max(1).next_power_of_two();
+    let capacity = num_chunks * 8;
+    let distinct_keys = ((capacity as f64 * 0.89) as usize).max(1);
+
+    // sel controls build/probe split:
+    //   numKeys = distinctKeys * sel (inserted during build)
+    //   probeMisses = distinctKeys - numKeys (new keys during probe)
+    let num_keys = ((distinct_keys as f64 * sel) as usize).max(1);
+    let probe_misses = distinct_keys - num_keys;
+    let probe_hits = if NUM_PROBE_ROWS > probe_misses { NUM_PROBE_ROWS - probe_misses } else { 0 };
+    let num_probe_rows = probe_hits + probe_misses;
+
+    eprintln!("  sizing: numChunks={}, capacity={}, distinctKeys={}", num_chunks, capacity, distinct_keys);
+    eprintln!("  build: numKeys={} ({:.1}% of capacity)", num_keys, 100.0 * num_keys as f64 / capacity as f64);
+    eprintln!("  probe: hits={}, misses={}, probeRows={}", probe_hits, probe_misses, num_probe_rows);
+    eprintln!("  final fill: {}/{} = {:.1}% (expand threshold=90.0%)",
+             distinct_keys, capacity, 100.0 * distinct_keys as f64 / capacity as f64);
+
     let mut rng = Mt19937GenRand64::new(SEED);
     let mut str_cols: Vec<Vec<Vec<u8>>> = (0..NUM_STR_COLS)
         .map(|c| (0..num_keys).map(|i| format!("key_{}_c{}", i, c).into_bytes()).collect()).collect();
@@ -52,28 +70,36 @@ fn gen_data(sel: f64, ht_size: usize, load_factor: f64) -> TestData {
         h
     }).collect();
 
-    let num_hits = (NUM_PROBE_ROWS as f64 * sel) as usize;
-    let num_misses = NUM_PROBE_ROWS - num_hits;
     let mut probe_str: Vec<Vec<Vec<u8>>> = vec![Vec::new(); NUM_STR_COLS];
     let mut probe_hashes: Vec<u64> = Vec::new();
-    for _ in 0..num_hits { let idx = (rng.next_u64() as usize) % num_keys; for c in 0..NUM_STR_COLS { probe_str[c].push(str_cols[c][idx].clone()); } probe_hashes.push(build_hashes[idx]); }
-    for i in 0..num_misses { let mut h = 0u64; for c in 0..NUM_STR_COLS { let s = format!("miss_{}_{}", i, c).into_bytes(); h = hash_bytes(&s, h); probe_str[c].push(s); } probe_hashes.push(h); }
+    for _ in 0..probe_hits {
+        let idx = (rng.next_u64() as usize) % num_keys;
+        for c in 0..NUM_STR_COLS { probe_str[c].push(str_cols[c][idx].clone()); }
+        probe_hashes.push(build_hashes[idx]);
+    }
+    for i in 0..probe_misses {
+        let mut h = 0u64;
+        for c in 0..NUM_STR_COLS {
+            let s = format!("miss_{}_{}", i, c).into_bytes();
+            h = hash_bytes(&s, h);
+            probe_str[c].push(s);
+        }
+        probe_hashes.push(h);
+    }
 
-    let mut order: Vec<usize> = (0..NUM_PROBE_ROWS).collect();
-    for i in (1..NUM_PROBE_ROWS).rev() { order.swap(i, (rng.next_u64() as usize) % (i + 1)); }
+    // Shuffle probe rows
+    let mut order: Vec<usize> = (0..num_probe_rows).collect();
+    for i in (1..num_probe_rows).rev() { order.swap(i, (rng.next_u64() as usize) % (i + 1)); }
     let probe_str: Vec<Vec<Vec<u8>>> = (0..NUM_STR_COLS).map(|c| order.iter().map(|&i| probe_str[c][i].clone()).collect()).collect();
     let probe_hashes: Vec<u64> = order.iter().map(|&i| probe_hashes[i]).collect();
 
-    let total_rows = num_keys + NUM_PROBE_ROWS;
+    // Combine: base keys first, then probe rows
+    let total_rows = num_keys + num_probe_rows;
     for c in 0..NUM_STR_COLS { str_cols[c].extend(probe_str[c].iter().cloned()); }
     let mut all_hashes = build_hashes; all_hashes.extend_from_slice(&probe_hashes);
     let values: Vec<i64> = (0..total_rows).map(|i| (i % 1000) as i64).collect();
 
-    let distinct_keys = num_keys + num_misses;
-    let min_slots = ((distinct_keys as f64 / 0.85) as usize).max(8);
-    let num_chunks = ((min_slots + 7) / 8).next_power_of_two();
-
-    // Pre-compute slices (ptr, len) — same layout as C++ vector<vector<VarcharSlice>>
+    // Pre-compute slices
     let slices: Vec<Vec<Slice>> = (0..NUM_STR_COLS)
         .map(|c| str_cols[c].iter().map(|s| Slice { ptr: s.as_ptr(), len: s.len() }).collect())
         .collect();
@@ -377,12 +403,11 @@ fn main() {
     let sel: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.1);
     let num_iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_ITERS);
     let ht_size: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16384);
-    let load_factor: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.5);
 
     eprintln!("=== Rust EmplaceBatch Breakdown ===");
-    eprintln!("sel={:.2}, iters={}, ht={}, lf={:.2}", sel, num_iters, ht_size, load_factor);
+    eprintln!("sel={:.2}, iters={}, ht={}", sel, num_iters, ht_size);
     eprintln!("Generating data...");
-    let data = gen_data(sel, ht_size, load_factor);
+    let data = gen_data(sel, ht_size);
     eprintln!("totalRows={}, numKeys={}, numChunks={}\n", data.total_rows, data.num_keys, data.num_chunks);
 
     let bench = |name: &str, f: fn(&TestData) -> u64| {
@@ -394,15 +419,15 @@ fn main() {
         println!("{:<30}  {:7.2} ms  checksum={}", name, per_iter, checksum);
     };
 
-    // Optional stage filter: argv[5] = "5" or "7" or "9" etc.
-    let stage_filter: String = args.get(5).cloned().unwrap_or_default();
+    // Optional stage filter: argv[4] = "5" or "7" or "9" etc.
+    let stage_filter: String = args.get(4).cloned().unwrap_or_default();
     let should_run = |name: &str| -> bool {
         if stage_filter.is_empty() { return true; }
         stage_filter.contains(&name[..1]) || stage_filter.contains(name)
     };
 
-    println!("=== Rust EmplaceBatch Breakdown (ht={}, lf={:.2}, sel={:.2}, {} iters, {} rows) ===",
-             ht_size, load_factor, sel, num_iters, data.total_rows);
+    println!("=== Rust EmplaceBatch Breakdown (ht={}, sel={:.2}, {} iters, {} rows) ===",
+             ht_size, sel, num_iters, data.total_rows);
     if should_run("1") { bench("1. hash_and_position", bench_hash_and_position); }
     if should_run("3") { bench("3. load_tags", bench_load_tags); }
     if should_run("4") { bench("4. match_tag_swar", bench_match_tag); }

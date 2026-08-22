@@ -26,7 +26,6 @@
 static constexpr size_t NUM_STR_COLS = 4;
 static constexpr size_t NUM_INT_COLS = 0;
 static constexpr size_t HT_SIZE = 16384;
-static constexpr double LOAD_FACTOR = 0.50;
 static constexpr size_t NUM_PROBE_ROWS = 1000000;
 static constexpr size_t BATCH_SIZE = 410;
 static constexpr uint64_t SEED = 42;
@@ -216,18 +215,24 @@ int main(int argc, char** argv) {
         else if (i == 3) numIters = static_cast<size_t>(std::atoi(argv[i]));
     }
 
-    size_t numKeys = static_cast<size_t>(HT_SIZE * LOAD_FACTOR);
-    size_t numMisses = NUM_PROBE_ROWS - static_cast<size_t>(NUM_PROBE_ROWS * sel);
-    size_t distinctKeys = numKeys + numMisses;
-    size_t minSlots = std::max(static_cast<size_t>(distinctKeys / 0.85), size_t(8));
-    size_t numChunks = 1;
-    while (numChunks * 8 < minSlots) numChunks *= 2;
+    size_t numChunks = HT_SIZE / 8;
+    if (numChunks < 1) numChunks = 1;
+    { size_t nc = 1; while (nc < numChunks) nc <<= 1; numChunks = nc; }
+    size_t capacity = numChunks * 8;
+    size_t distinctKeys = static_cast<size_t>(capacity * 0.89);
+    if (distinctKeys < 1) distinctKeys = 1;
+    size_t numKeys = static_cast<size_t>(distinctKeys * sel);
+    if (numKeys < 1) numKeys = 1;
+    size_t probeMisses = distinctKeys - numKeys;
+    size_t probeHits = (NUM_PROBE_ROWS > probeMisses) ? (NUM_PROBE_ROWS - probeMisses) : 0;
+    double actualSel = static_cast<double>(numKeys) / distinctKeys;
 
     fprintf(stderr, "=== C++ Pipeline Micro Bench ===\n");
-    fprintf(stderr, "sel=%.1f, iters=%zu, totalRows=%zu, numChunks=%zu\n", sel, numIters, numKeys + NUM_PROBE_ROWS, numChunks);
+    fprintf(stderr, "sel=%.1f, iters=%zu, numChunks=%zu, capacity=%zu\n", sel, numIters, numChunks, capacity);
+    fprintf(stderr, "distinctKeys=%zu, build=%zu, probeMisses=%zu, probeHits=%zu\n", distinctKeys, numKeys, probeMisses, probeHits);
     if (stage) fprintf(stderr, "Stage filter: %s\n", stage);
     fprintf(stderr, "\nGenerating data...\n");
-    BenchData data = GenData(numKeys, sel);
+    BenchData data = GenData(numKeys, actualSel);
     fprintf(stderr, "Done.\n\n");
 
     auto bench = [&](const char* name, const char* tag, size_t(*fn)(const BenchData&, size_t)) {
