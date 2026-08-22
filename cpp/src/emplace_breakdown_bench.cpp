@@ -167,6 +167,14 @@ static TestData GenData(double sel) {
             d.flatSlices[i * NUM_STR_COLS + c].len = d.strCols[c][i].size();
         }
     }
+    // Debug: print len checksum to verify data matches Rust
+    {
+        uint64_t lenSum = 0;
+        for (size_t i = 0; i < d.totalRows * NUM_STR_COLS; i++) lenSum += d.flatSlices[i].len;
+        fprintf(stderr, "  flatSlices lenSum=%lu, first10:", (unsigned long)lenSum);
+        for (size_t i = 0; i < 10 && i < d.flatSlices.size(); i++) fprintf(stderr, " %zu", d.flatSlices[i].len);
+        fprintf(stderr, "\n");
+    }
     return d;
 }
 

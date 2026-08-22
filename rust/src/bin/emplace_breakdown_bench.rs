@@ -117,6 +117,14 @@ fn gen_data(sel: f64, ht_size: usize) -> TestData {
         }
     }
 
+    // Debug: print len checksum to verify data matches C++
+    {
+        let len_sum: u64 = flat_slices.iter().map(|s| s.len as u64).sum();
+        eprint!("  flatSlices lenSum={}, first10:", len_sum);
+        for i in 0..10.min(flat_slices.len()) { eprint!(" {}", flat_slices[i].len); }
+        eprintln!();
+    }
+
     TestData { str_cols, slices, flat_slices, hashes: all_hashes, values, total_rows, num_keys, num_chunks }
 }
 
