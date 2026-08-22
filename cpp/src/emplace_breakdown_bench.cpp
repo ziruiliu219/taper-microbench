@@ -49,6 +49,7 @@ static inline uint64_t HB(const uint8_t* d, size_t l, uint64_t s) { return XXH3_
 struct TestData {
     std::vector<std::vector<std::vector<uint8_t>>> strCols;
     std::vector<std::vector<taper::VarcharSlice>> slices;
+    std::vector<taper::VarcharSlice> flatSlices; // flatSlices[i * NUM_STR_COLS + c]
     std::vector<int64_t> hashes;
     std::vector<int64_t> values;
     size_t totalRows, numKeys, numChunks;
@@ -156,6 +157,14 @@ static TestData GenData(double sel) {
         for (size_t i = 0; i < d.totalRows; i++) {
             d.slices[c][i].ptr = d.strCols[c][i].data();
             d.slices[c][i].len = d.strCols[c][i].size();
+        }
+    }
+    // Build flat slices: row-major [i * NUM_STR_COLS + c]
+    d.flatSlices.resize(d.totalRows * NUM_STR_COLS);
+    for (size_t i = 0; i < d.totalRows; i++) {
+        for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            d.flatSlices[i * NUM_STR_COLS + c].ptr = d.strCols[c][i].data();
+            d.flatSlices[i * NUM_STR_COLS + c].len = d.strCols[c][i].size();
         }
     }
     return d;
@@ -319,6 +328,31 @@ static uint64_t BenchMemcpyOnly(const TestData& d) {
     return checksum;
 }
 
+// 7c. memcpy with flat array (eliminate vector-of-vector indirection)
+__attribute__((noinline))
+static uint64_t BenchMemcpyFlat(const TestData& d) {
+    size_t maxPerRow = 4 * 30;
+    size_t bufSize = d.totalRows * maxPerRow;
+    uint8_t* buf = static_cast<uint8_t*>(malloc(bufSize));
+    memset(buf, 0, bufSize);
+
+    uint64_t checksum = 0;
+    size_t numCols = NUM_STR_COLS;
+    asm volatile("" : "+r"(numCols));
+    const taper::VarcharSlice* flat = d.flatSlices.data();
+    uint8_t* wp = buf;
+    for (size_t i = 0; i < d.totalRows; i++) {
+        for (size_t c = 0; c < numCols; c++) {
+            const auto& s = flat[i * NUM_STR_COLS + c];
+            memcpy(wp, s.ptr, s.len);
+            wp += s.len;
+        }
+        checksum += reinterpret_cast<uint64_t>(wp);
+    }
+    free(buf);
+    return checksum;
+}
+
 // 8. Store value
 __attribute__((noinline))
 static uint64_t BenchStoreValue(const TestData& d) {
@@ -456,6 +490,7 @@ int main(int argc, char** argv) {
     if (shouldRun("7")) bench("7. serialize_key_4col", BenchSerializeKey);
     if (shouldRun("7")) bench("7a.serialize_prealloc", BenchSerializePrealloc);
     if (shouldRun("7")) bench("7b.memcpy_only", BenchMemcpyOnly);
+    if (shouldRun("7")) bench("7c.memcpy_flat", BenchMemcpyFlat);
     if (shouldRun("8")) bench("8. store_value_i64", BenchStoreValue);
     if (shouldRun("9")) bench("9. compare_varchar_4col", BenchCompareVarchar);
     if (shouldRun("10")) bench("10. accumulate", BenchAccumulate);

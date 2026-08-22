@@ -35,6 +35,7 @@ struct Slice {
 struct TestData {
     str_cols: Vec<Vec<Vec<u8>>>,
     slices: Vec<Vec<Slice>>,  // pre-computed (ptr, len) pairs — same as C++
+    flat_slices: Vec<Slice>,  // flat_slices[i * NUM_STR_COLS + c]
     hashes: Vec<u64>,
     values: Vec<i64>,
     total_rows: usize,
@@ -108,7 +109,15 @@ fn gen_data(sel: f64, ht_size: usize) -> TestData {
         .map(|c| str_cols[c].iter().map(|s| Slice { ptr: s.as_ptr(), len: s.len() }).collect())
         .collect();
 
-    TestData { str_cols, slices, hashes: all_hashes, values, total_rows, num_keys, num_chunks }
+    // Flat slices: row-major [i * NUM_STR_COLS + c]
+    let mut flat_slices: Vec<Slice> = Vec::with_capacity(total_rows * NUM_STR_COLS);
+    for i in 0..total_rows {
+        for c in 0..NUM_STR_COLS {
+            flat_slices.push(Slice { ptr: str_cols[c][i].as_ptr(), len: str_cols[c][i].len() });
+        }
+    }
+
+    TestData { str_cols, slices, flat_slices, hashes: all_hashes, values, total_rows, num_keys, num_chunks }
 }
 
 // ─── Steps ───────────────────────────────────────────────────────
@@ -330,6 +339,32 @@ fn bench_memcpy_only(d: &TestData) -> u64 {
     checksum
 }
 
+/// 7c. memcpy with flat array (eliminate vector-of-vector indirection)
+#[inline(never)]
+fn bench_memcpy_flat(d: &TestData) -> u64 {
+    let max_per_row = 4 * 30;
+    let buf_size = d.total_rows * max_per_row;
+    let buf = unsafe { libc::malloc(buf_size) as *mut u8 };
+    unsafe { libc::memset(buf as *mut libc::c_void, 0, buf_size); }
+
+    let num_cols = std::hint::black_box(NUM_STR_COLS);
+    let mut checksum: u64 = 0;
+    let mut wp = buf;
+    let flat = d.flat_slices.as_ptr();
+    for i in 0..d.total_rows {
+        for c in 0..num_cols {
+            unsafe {
+                let s = &*flat.add(i * NUM_STR_COLS + c);
+                libc::memcpy(wp as *mut libc::c_void, s.ptr as *const libc::c_void, s.len);
+                wp = wp.add(s.len);
+            }
+        }
+        checksum = checksum.wrapping_add(wp as u64);
+    }
+    unsafe { libc::free(buf as *mut libc::c_void); }
+    checksum
+}
+
 /// Same as bench_serialize_key but uses noinline memcpy (forces PLT call like C++/GCC)
 #[inline(never)]
 fn bench_serialize_key_noinline(d: &TestData) -> u64 {
@@ -536,7 +571,8 @@ fn main() {
     if should_run("7") { bench("7. serialize_key_4col", bench_serialize_key); }
     if should_run("7") { bench("7a.serialize_prealloc", bench_serialize_prealloc); }
     if should_run("7") { bench("7b.memcpy_only", bench_memcpy_only); }
-    if should_run("7") { bench("7c.serialize_noinline_memcpy", bench_serialize_key_noinline); }
+    if should_run("7") { bench("7c.memcpy_flat", bench_memcpy_flat); }
+    if should_run("7") { bench("7d.serialize_noinline_memcpy", bench_serialize_key_noinline); }
     if should_run("8") { bench("8. store_value_i64", bench_store_value); }
     if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
     if should_run("10") { bench("10. accumulate", bench_accumulate); }
