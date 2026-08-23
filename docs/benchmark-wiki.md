@@ -1,152 +1,303 @@
 # Taper Microbenchmark Wiki
 
-## 概述
+## 1. 项目概述
 
-本项目对比 C++（GCC, 鲲鹏 aarch64）和 Rust（LLVM）实现的 TaperHashMap EmplaceBatch 全流程性能。
-核心 benchmark 是 `emplace_breakdown_bench`，将 `EmplaceTableWithDecode` 的完整流程拆解为独立可测的子步骤。
+对比 C++（GCC, 鲲鹏 aarch64）和 Rust（LLVM）实现的 TaperHashMap `EmplaceTableWithDecode` 全流程性能。
+两边实现逻辑完全一致，对标 OmniOperator 的 `TaperColumnSerializeHandler`。
 
-## 参数
+---
 
-| 参数 | 含义 | 默认值 |
-|------|------|--------|
-| `sel` | build/probe 分配比例。`sel=0.5` 表示 50% distinct key 在 build 阶段插入，50% 在 probe 阶段作为 miss 插入 | 0.1 |
-| `ht_size` | hash table 总 slot 数（= numChunks × 8） | 16384 |
-| `iters` | 每个 step 重复执行次数（取平均） | 5 |
-
-### 防 rehash 保证
+## 2. 代码结构
 
 ```
-distinctKeys = capacity * 9 / 10 - 1
-expandThreshold = capacity * 9 / 10
-
-distinctKeys < expandThreshold → 永远不会触发 ShouldExpand()
+taper-microbench/
+├── cpp/
+│   ├── include/
+│   │   ├── taper_hashtable.h          # TaperFlatHashTable（hash table 核心）
+│   │   ├── column_marshaller.h        # TaperColumnSerializeHandler（5步流程）
+│   │   ├── row_container.h            # RowContainer（行存储）
+│   │   └── simple_arena_allocator.h   # SimpleArenaAllocator（内存分配）
+│   └── src/
+│       ├── emplace_breakdown_bench.cpp # ★ 主 benchmark（按 step 拆解）
+│       ├── step_by_step_bench.cpp      # 简化版 step benchmark
+│       ├── micro_pipeline_bench.cpp    # 增量叠加 benchmark
+│       └── profile_taper_standalone.cpp
+├── rust/
+│   └── src/
+│       ├── taper_hashmap.rs           # TaperHashMap
+│       ├── column_marshaller.rs       # TaperColumnSerializeHandler
+│       ├── row_container.rs           # RowContainer
+│       ├── batch_compare.rs           # BatchCompare（SIMD/scalar）
+│       ├── bitmask.rs                 # BitMask（SWAR）
+│       ├── chunk.rs                   # Chunk + SlotValue
+│       └── bin/
+│           ├── emplace_breakdown_bench.rs  # ★ 主 benchmark
+│           ├── step_by_step_bench.rs
+│           └── micro_pipeline_bench.rs
+├── run_breakdown_matrix.sh            # 跑全 matrix 脚本
+├── run_all.sh                         # 简单全量输出
+└── docs/
+    └── benchmark-wiki.md              # 本文件
 ```
 
-用整数运算，零浮点依赖，数学上 100% 保证不 rehash。
+---
 
-## 用法
+## 3. 核心数据结构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TaperFlatHashTable                         │
+│                                                              │
+│  chunks: *mut Chunk  (posix_memalign 128B 对齐)              │
+│  num_chunks: 2的幂                                           │
+│  mask: num_chunks - 1                                        │
+│  size: 当前已插入 entry 数                                    │
+│                                                              │
+│  ┌─── Chunk (128 bytes = 2 cache lines) ───┐                │
+│  │ tags:   [u8; 8]     @ offset 0          │                │
+│  │ keys:   [u64; 8]    @ offset 8          │                │
+│  │ _pad:   [u8; 8]     @ offset 72         │                │
+│  │ values: [SlotValue; 8] @ offset 80      │                │
+│  └──────────────────────────────────────────┘                │
+│                                                              │
+│  SlotValue = 6 bytes (compressed 48-bit row pointer)         │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    RowContainer                               │
+│                                                              │
+│  Row layout: [col0][col1]...[colN][null_bytes][agg_state]   │
+│  - Fixed col: 直接存 value（如 i64 = 8 bytes）              │
+│  - Varchar col: 存 8-byte pointer → arena 数据               │
+│                                                              │
+│  Arena 数据格式: [rowLenSize:1B][length:1-4B][data:NB]       │
+│  - rowLenSize=1: length ≤ 255                                │
+│  - rowLenSize=2: length ≤ 65535                              │
+│  - rowLenSize=4: length ≤ 4GB                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. EmplaceTableWithDecode 5步流程
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│            EmplaceTableWithDecode（per batch, 410 rows）              │
+│                                                                     │
+│  Step 1: Hash                                                       │
+│  ┌─────────────────┐                                                │
+│  │ hash[i] = key   │  (KeyScattered = identity hash)                │
+│  │ pos[i] = hash & mask                                             │
+│  └────────┬────────┘                                                │
+│           ▼                                                         │
+│  Step 2+3: EmplaceBatch (hash table probe + insert)                 │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ for each row:                                                │    │
+│  │   prefetch chunk[pos[i+16]]                                  │    │
+│  │   TryEmplaceAtPos:                                           │    │
+│  │     tag_match → keys[slot] == hash → on_update(existing)     │    │
+│  │     empty_slot → on_init(new group):                         │    │
+│  │       ├─ NewRow()                                            │    │
+│  │       ├─ StoreKeyOneRow (serialize 4 varchar → arena) ←Step7│    │
+│  │       ├─ StoreValue<i64>(agg)                        ←Step8 │    │
+│  │       └─ set SlotValue = row pointer                         │    │
+│  │     chunk_full → linear probe next chunk                     │    │
+│  │   collect collisions → iterate until resolved                │    │
+│  └────────┬────────────────────────────────────────────────────┘    │
+│           ▼                                                         │
+│  Step 4: GetUnequalsNumWithDecode (batch key comparison)            │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ for each update_row:                                         │    │
+│  │   read arena_ptr from group row                              │    │
+│  │   for each varchar col:                                      │    │
+│  │     CompareVarcharFromRow(arena, input) ← memcmp     ←Step9 │    │
+│  │   if unequal → move to front of unequals list                │    │
+│  └────────┬────────────────────────────────────────────────────┘    │
+│           ▼                                                         │
+│  Step 5: Re-emplace unequals (scalar per-row Emplace)               │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ for each unequal row:                                        │    │
+│  │   Emplace(hash, full_key_cmp, on_init, on_update)            │    │
+│  └────────┬────────────────────────────────────────────────────┘    │
+│           ▼                                                         │
+│  Accumulate: agg += value for confirmed-equal rows          ←Step10 │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Benchmark Step 对应关系
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│  Step 名称              │ 测什么                  │ 调用方式        │
+├─────────────────────────┼─────────────────────────┼─────────────────┤
+│ 1. hash_and_position    │ Hash + ChunkPos         │ 独立循环        │
+│ 3. load_tags            │ chunk->TagsU64()        │ 独立循环        │
+│ 4. match_tag_swar       │ PHBitMask::MatchTag     │ 独立循环        │
+│ 5. compare_key_hash     │ keys[slot]==hash (i64)  │ 预建 HT 后 probe│
+│ 6. new_row              │ RowContainer::NewRow    │ 独立循环        │
+│ 7. serialize_key_4col   │ SerializeVarcharToBuffer│ emplace 回调    │
+│ 8. store_value_i64      │ StoreValue<i64>         │ 独立循环        │
+│ 9. compare_varchar_4col │ CompareVarcharFromRow   │ emplace+compare │
+│ 10. accumulate          │ agg += value            │ 独立循环        │
+│ FULL: pipeline          │ EmplaceTableWithDecode  │ batch 驱动      │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 6. 数据生成与防 Rehash
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  输入: ht_size (总 slot 数), sel (build/probe 分配比例)           │
+│                                                                 │
+│  numChunks = (ht_size / 8).next_power_of_two()                  │
+│  capacity = numChunks × 8                                       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────┐                │
+│  │ distinctKeys = capacity × 9 / 10 - 1        │ ← 整数运算     │
+│  │ expandThreshold = capacity × 9 / 10         │                │
+│  │                                             │                │
+│  │ distinctKeys < expandThreshold              │ ← 永不 expand  │
+│  └─────────────────────────────────────────────┘                │
+│                                                                 │
+│  numKeys = distinctKeys × sel      (build 阶段插入)              │
+│  probeMisses = distinctKeys - numKeys (probe 阶段新 key)         │
+│  probeHits = 1M - probeMisses      (probe 命中已有 key)          │
+│                                                                 │
+│  Hash Table 填充过程:                                            │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ size                                                     │    │
+│  │  ▲                                                       │    │
+│  │  │ expandThreshold ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─    │    │
+│  │  │ distinctKeys ─────────────────────────────●           │    │
+│  │  │                                     ╱                 │    │
+│  │  │ numKeys ──────────●──────────────╱                    │    │
+│  │  │              ╱                                        │    │
+│  │  │───────────╱─────────────────────────────▶ time        │    │
+│  │  │  build 阶段  │     probe 阶段                         │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 7. 关键函数对比（C++ vs Rust）
+
+### SerializeVarcharToBuffer
+
+```
+C++:                                    Rust:
+─────────────────────────────────────   ─────────────────────────────────────
+*writePos = rowLenSize;                 *write_pos = row_len_size;
+memcpy(writePos+1, &l32, rowLenSize);   libc::memcpy(+1, &l32, rls);
+memcpy(writePos+1+rls, data, len);      libc::memcpy(+1+rls, data, len);
+return 1 + rls + len;                   return 1 + rls + len;
+```
+
+### CompareVarcharFromRow
+
+```
+C++:                                    Rust:
+─────────────────────────────────────   ─────────────────────────────────────
+rowLenSize = *rowData;                  row_len_size = *arena_ptr;
+switch(rls) → parse stringLen           match rls → parse string_len
+if (stringLen != inputLen) return false  if string_len != input.len() → false
+memcmp(stored, input, len) == 0         memcmp_ptr(stored, input, len) == 0
+                                        ↑ 函数指针调用（阻止 bcmp 优化）
+```
+
+### TryEmplaceAtPos
+
+```
+C++ / Rust 完全一致:
+─────────────────────────────────────
+1. tag_hash = (hash >> 16) & 0x7F
+2. tags = chunk.TagsU64()
+3. MatchTag(tags, tag_hash) → iterate:
+     if keys[slot] == hash → on_update(existing)
+4. MatchEmpty(tags) → first empty:
+     size++; tags[slot] = tag_hash
+     keys[slot] = hash
+     on_init(new) → on_update(new)
+5. return false (chunk full → linear probe)
+```
+
+### BitMask / PHBitMask (SWAR)
+
+```
+两边完全一致:
+─────────────────────────────────────
+MatchTag:  (x - LSBS) & ~x & MSBS    where x = tags ^ (LSBS * target)
+MatchEmpty: (tags & (~tags << 7)) & MSBS
+Iterator:   slot = ctz(mask) >> 3;  mask &= (mask - 1)
+```
+
+---
+
+## 8. Benchmark 设计决策
+
+### 为什么 step 7/9 用 emplace 回调驱动？
+
+早期版本用独立循环遍历 `d.slices[c][i]`（二维 vector），GCC 生成了低效代码：
+
+```
+早期（独立循环）:              现在（emplace 回调）:
+─────────────────────────────  ─────────────────────────────
+for i in 0..N:                 table.EmplaceBatch(hashes,
+  for c in 0..4:                 on_init = |rowIdx| {
+    serialize(slices[c][i])        for c in 0..4:
+                                     serialize(colSlices[c][rowIdx])
+                                 })
+
+GCC 每次循环 reload base ptr    GCC 在 lambda inline 后
+(3层指针追逐 = 慢2x)           指针已在寄存器中 (一致)
+```
+
+### 为什么 Rust compare 用函数指针调 memcmp？
+
+LLVM 自动优化 `memcmp(...)==0` → `bcmp`（只判等，更快退出）。
+C++/GCC 不做这个优化。为了公平对比，Rust 用 `black_box(libc::memcmp)` 函数指针阻止此优化。
+
+### 为什么 accumulate 用 branch 替代 modulo？
+
+```
+早期: rows[i % numKeys]    →  GCC 每次生成 udiv 指令 (慢)
+现在: if (++idx >= n) idx=0 →  两边都是 branch (一致)
+```
+
+---
+
+## 9. 用法
 
 ```bash
 # 编译
 cd cpp/build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j
 cd ../../rust && cargo build --release
 
-# 单次运行（所有 step）
-./cpp/build/cpp_emplace_breakdown 0.5 5 262144
-./rust/target/release/emplace_breakdown_bench 0.5 5 262144
+# 单组对比
+taskset -c 0 ./cpp/build/cpp_emplace_breakdown 0.5 5 262144
+taskset -c 0 ./rust/target/release/emplace_breakdown_bench 0.5 5 262144
 
-# 只跑特定 step（用 stage filter）
-./cpp/build/cpp_emplace_breakdown 0.5 5 262144 7     # 只跑 serialize
-./cpp/build/cpp_emplace_breakdown 0.5 5 262144 M     # 只跑 minimal benchmarks
+# 参数说明: <sel> [iters] [ht_size] [stage_filter]
+# stage_filter: "7" 只跑 serialize, "M" 只跑 minimal, 空=全部
 
-# 跑全 matrix（4 ht × 5 sel × C++/Rust）
+# 全 matrix (4 ht × 5 sel × C++/Rust)
 ./run_breakdown_matrix.sh 5
 ```
 
-## Step 拆解
+---
 
-### 主要 Step（对应 FULL pipeline 的各阶段）
+## 10. 结论
 
-| Step | 名称 | 测试内容 | 调用方式 |
-|------|------|----------|----------|
-| 1 | hash_and_position | `Hash(key)` + `GetChunkPos(hash)` | 独立循环 |
-| 3 | load_tags | `chunk->TagsU64()` | 独立循环 |
-| 4 | match_tag_swar | `PHBitMask::MatchTag` (SWAR 位匹配) | 独立循环 |
-| 5 | compare_key_hash | tag match 后 `keys[slot] == hash` (int64 比较) | 在已建好的 hashmap 上 probe |
-| 6 | new_row | `RowContainer::NewRow()` (arena bump 分配) | 独立循环 |
-| **7** | **serialize_key_4col** | **StoreKeyOneRow: 4 列 varchar serialize 到 arena** | **emplace 回调驱动** |
-| 8 | store_value_i64 | `StoreValue<i64>` (写 agg state) | 独立循环 |
-| **9** | **compare_varchar_4col** | **CompareVarcharFromRow × 4 列** | **emplace 建组 + batch compare** |
-| 10 | accumulate | `agg += value` (原地累加) | 独立循环 |
-| FULL | pipeline | 完整 `EmplaceTableWithDecode`（5 步流程） | batch 驱动 |
+| 维度 | 结果 |
+|------|------|
+| FULL pipeline | C++ ≈ Rust（ratio 1.02x 平均） |
+| 各 step 独立 | 对齐后所有 step ratio 接近 1:1 |
+| 核心函数（单次调用） | M1/M2 验证完全一致 |
+| 根因 | 早期差异来自 benchmark harness，不是实现差异 |
 
-### Step 7 (serialize) 详细说明
-
-**调用方式**：通过 `EmplaceBatch` / `emplace_batch_full` 的 `on_init` 回调驱动（不是独立循环），与 FULL pipeline 完全相同的执行路径。
-
-**测量内容**：
-1. 从 `colSlices[c][rowIdx]` 读取 varchar ptr/len
-2. 计算 totalSize（4 列）
-3. `ArenaAlloc(totalSize)`
-4. `SerializeVarcharToBuffer` × 4 列
-5. 写 row pointer 到 hash table slot
-
-**关键设计**：早期版本用独立循环遍历 `d.slices[c][i]`（二维 vector），导致 GCC 生成低效代码（多一层指针追逐），C++ 比 Rust 慢 2x。改为 emplace 回调驱动后，两边代码在相同的 inline context 下执行，性能一致（ratio ≈ 1:1）。
-
-### Step 9 (compare_vc) 详细说明
-
-**调用方式**：分两阶段——
-1. **Setup**：通过 emplace 建好所有 groups（serialize 到 RowContainer）
-2. **Compare**：batch-driven 遍历所有 row，从 group 读 arena 指针，对 4 列分别调 `CompareVarcharFromRow`
-
-**测量内容**（包含 setup + compare）：
-- Setup：emplace + serialize（同 step 7）
-- Compare：从 row 读 pointer → parse arena format → `memcmp` 对比
-
-**注意**：step 9 的绝对值 > step 7，因为它包含了完整的 emplace 建组 + compare 两部分。
-
-### Step 10 (accumulate) 详细说明
-
-循环遍历所有行，对目标 group 做 `agg += value`。用 `if (++idx >= numKeys) idx = 0` 替代 `i % numKeys` 取模，避免 GCC 未优化的 `udiv` 指令导致不公平差异。
-
-## Minimal Benchmarks (M1/M2/M3)
-
-用于定位具体函数的单次调用开销，排除数据遍历影响：
-
-| Step | 内容 | 迭代次数 |
-|------|------|----------|
-| M1 | `SerializeVarcharToBuffer` 对固定 12 字节字符串 | totalRows × 4 |
-| M2 | `memcpy` 12 字节（运行时长度，阻止常量传播） | totalRows × 4 |
-| M3 | `CompareVarcharFromRow` 对固定 12 字节 | totalRows × 4 |
-
-这些验证了：**单次函数调用 C++ 和 Rust 性能一致**（ratio ≈ 1:1），差异只来自调用上下文（循环结构、数据访问模式）。
-
-## 辅助 Step（7a/7b/7c/7e）
-
-用于诊断 serialize 差异来源的实验性 step：
-
-| Step | 内容 | 发现 |
-|------|------|------|
-| 7a | serialize 用预分配 buffer（无 allocator） | 排除了 allocator 是瓶颈 |
-| 7b | 只做 memcpy 数据（遍历 `slices[c][i]`） | 发现遍历模式是瓶颈 |
-| 7c | memcpy 用 flat 数组（无 vector-of-vector） | 证明 vector indirection 有部分影响 |
-| 7e | 强制 load-before-memcpy 串行化 | 排除了 OOO 执行差异 |
-
-## 核心发现
-
-1. **FULL pipeline C++ ≈ Rust**（ratio 1.02x 平均）
-2. **独立 step 的差异来源**：
-   - serialize/compare_vc 在独立循环中 C++ 慢 2x → 改为 emplace 驱动后对齐
-   - 根因：GCC 对 `vector<vector<T>>[c][i]` 遍历不做 loop-invariant code motion（每次循环从内存重新 load base pointer），LLVM 做了
-3. **memcmp vs bcmp**：LLVM 自动把 `memcmp(...)==0` 优化为 `bcmp`（只判等，更快）。Rust 已强制使用 `memcmp` 函数指针来对齐 C++ 行为
-4. **取模开销**：GCC 不优化循环中的 `i % n`，LLVM 做 strength reduction。已改用 branch 替代
-
-## 数据生成
-
-```
-numChunks = ht_size / 8 (向上取 2 的幂)
-capacity = numChunks × 8
-distinctKeys = capacity * 9 / 10 - 1
-
-numKeys = distinctKeys × sel        (build 阶段插入)
-probeMisses = distinctKeys - numKeys (probe 阶段新 key)
-probeHits = NUM_PROBE_ROWS - probeMisses (probe 命中已有 key)
-```
-
-所有数据包含 4 列 varchar，字符串格式 `key_{id}_c{col}`（约 8-15 字节）。
-
-## 文件结构
-
-```
-cpp/include/taper_hashtable.h     — TaperFlatHashTable 实现（同 OmniOperator）
-cpp/include/column_marshaller.h   — TaperColumnSerializeHandler（同 OmniOperator）
-cpp/include/row_container.h       — RowContainer（同 OmniOperator）
-cpp/src/emplace_breakdown_bench.cpp — C++ benchmark
-
-rust/src/taper_hashmap.rs         — TaperHashMap 实现
-rust/src/column_marshaller.rs     — TaperColumnSerializeHandler
-rust/src/row_container.rs         — RowContainer
-rust/src/bin/emplace_breakdown_bench.rs — Rust benchmark
-
-run_breakdown_matrix.sh           — 跑全 matrix 脚本
-```
+两边代码逻辑完全一致，最终性能差异 < 5%，在测量噪声范围内。
