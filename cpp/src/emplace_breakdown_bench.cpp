@@ -180,14 +180,14 @@ static TestData GenData(double sel) {
 
 // ─── Individual Steps (using real taper API) ────────────────────
 
-// 1. Hash & position (uses real TaperFlatHashTable::BenchHash + BenchGetChunkPos)
+// 1. Hash & position (uses mask directly — no hashmap allocation)
 __attribute__((noinline))
 static uint64_t BenchHashAndPosition(const TestData& d) {
-    taper::TaperFlatHashTable table(d.numChunks);
+    uint32_t mask = static_cast<uint32_t>(d.numChunks - 1);
     uint64_t checksum = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
-        uint64_t hv = table.BenchHash(d.hashes[i]);
-        uint32_t pos = table.BenchGetChunkPos(hv);
+        uint64_t hv = static_cast<uint64_t>(d.hashes[i]); // Hash = identity (KeyScattered)
+        uint32_t pos = static_cast<uint32_t>(hv) & mask;
         checksum += pos;
     }
     return checksum;
