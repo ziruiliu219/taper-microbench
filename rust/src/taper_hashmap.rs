@@ -11,7 +11,7 @@ const PREFETCH_DIST: usize = 16;
 /// TaperHashMap: chunked open-addressing hash table.
 /// Key = u64 (hash value), Value = 6-byte compressed pointer.
 ///
-/// Memory allocation: uses libc::posix_memalign(128) + memset(0x80) to match
+/// Memory allocation: uses libc::aligned_alloc(128) + memset(0x80) to match
 /// OmniOperator's Allocator::Alloc for chunk memory. This ensures identical
 /// memory layout and TLB/cache behavior as the C++ version.
 pub struct TaperHashMap {
@@ -30,14 +30,13 @@ impl Drop for TaperHashMap {
     }
 }
 
-/// Allocate chunk memory via posix_memalign(128) + memset(0x80).
-/// Matches OmniOperator: Allocator::Alloc(bytes) + memset(kEmptyTag).
+/// Allocate chunk memory via aligned_alloc(128) + memset(0x80).
+/// Matches C++ OmniOperator: aligned_alloc(128, bytes) + memset(kEmptyTag).
 unsafe fn alloc_chunks(num_chunks: usize) -> *mut Chunk {
     let bytes = num_chunks * std::mem::size_of::<Chunk>();
-    let mut ptr: *mut libc::c_void = std::ptr::null_mut();
-    let rc = libc::posix_memalign(&mut ptr, 128, bytes);
-    assert!(rc == 0 && !ptr.is_null(), "posix_memalign failed");
-    libc::memset(ptr, 0x80i32, bytes); // kEmptyTag = 0x80
+    let ptr = libc::aligned_alloc(128, bytes) as *mut u8;
+    assert!(!ptr.is_null(), "aligned_alloc failed");
+    libc::memset(ptr as *mut libc::c_void, 0x80i32, bytes); // kEmptyTag = 0x80
     ptr as *mut Chunk
 }
 
