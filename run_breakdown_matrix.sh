@@ -7,6 +7,15 @@ ITERS=${1:-5}
 CPP_BIN="./cpp/build/cpp_emplace_breakdown"
 RUST_BIN="./rust/target/release/emplace_breakdown_bench"
 
+# Ensure jemalloc is preloaded for both C++ and Rust (consistent allocator behavior)
+if [ -z "$LD_PRELOAD" ]; then
+    JEMALLOC=$(find /usr/lib /usr/local/lib /usr/lib64 -name "libjemalloc.so*" 2>/dev/null | head -1)
+    if [ -n "$JEMALLOC" ]; then
+        export LD_PRELOAD="$JEMALLOC"
+        echo "# Auto-preloading jemalloc: $JEMALLOC"
+    fi
+fi
+
 HT_SIZES=(16384 65536 262144 1048576)
 SELECTIVITIES=(0.1 0.3 0.5 0.7 0.9)
 
