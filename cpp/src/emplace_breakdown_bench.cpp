@@ -361,42 +361,34 @@ static uint64_t BenchMemcpyFlat(const TestData& d) {
 // 9. Compare varchar (4 cols) — only times the compare loop, not the serialize/build
 __attribute__((noinline))
 static uint64_t BenchCompareVarchar(const TestData& d) {
-    // Setup (cached): serialize numKeys rows once, reuse across bench iterations
-    static taper::SimpleArenaAllocator* sPool = nullptr;
-    static taper::RowContainer* sRc = nullptr;
-    static std::vector<uint8_t*> sRows;
-    static size_t sCachedKeys = 0;
-    static int32_t sColOffset = 0;
+    // Serialize numKeys rows + compare numKeys rows (no caching, same structure as serialize bench)
+    taper::SimpleArenaAllocator pool;
+    std::vector<size_t> keySizes(NUM_STR_COLS, 0);
+    std::vector<taper::ColumnKind> kinds(NUM_STR_COLS, taper::ColumnKind::Varchar);
+    taper::RowContainer rc(keySizes, kinds, 8, pool);
+    int32_t colOffset = rc.ColumnAt(0).Offset();
 
-    if (sCachedKeys != d.numKeys) {
-        delete sRc; delete sPool;
-        sPool = new taper::SimpleArenaAllocator();
-        std::vector<size_t> keySizes(NUM_STR_COLS, 0);
-        std::vector<taper::ColumnKind> kinds(NUM_STR_COLS, taper::ColumnKind::Varchar);
-        sRc = new taper::RowContainer(keySizes, kinds, 8, *sPool);
-        sColOffset = sRc->ColumnAt(0).Offset();
-        sRows.resize(d.numKeys);
-        for (size_t i = 0; i < d.numKeys; i++) {
-            char* row = sRc->NewRow();
-            size_t totalSize = 0;
-            for (size_t c = 0; c < NUM_STR_COLS; c++)
-                totalSize += 1 + taper::ComputeRowLenSize(d.slices[c][i].len) + d.slices[c][i].len;
-            uint8_t* block = sPool->Allocate(static_cast<int64_t>(totalSize));
-            uint8_t* wp = block;
-            for (size_t c = 0; c < NUM_STR_COLS; c++)
-                wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
-            memcpy(row, &block, sizeof(block));
-            taper::RowContainer::StoreValue<int64_t>(row, sRc->AggStateOffset(), 0);
-            sRows[i] = reinterpret_cast<uint8_t*>(row);
-        }
-        sCachedKeys = d.numKeys;
+    // Serialize
+    std::vector<uint8_t*> rows(d.numKeys);
+    for (size_t i = 0; i < d.numKeys; i++) {
+        char* row = rc.NewRow();
+        size_t totalSize = 0;
+        for (size_t c = 0; c < NUM_STR_COLS; c++)
+            totalSize += 1 + taper::ComputeRowLenSize(d.slices[c][i].len) + d.slices[c][i].len;
+        uint8_t* block = pool.Allocate(static_cast<int64_t>(totalSize));
+        uint8_t* wp = block;
+        for (size_t c = 0; c < NUM_STR_COLS; c++)
+            wp += taper::SerializeVarcharToBuffer(wp, d.slices[c][i].ptr, d.slices[c][i].len);
+        memcpy(row, &block, sizeof(block));
+        taper::RowContainer::StoreValue<int64_t>(row, rc.AggStateOffset(), 0);
+        rows[i] = reinterpret_cast<uint8_t*>(row);
     }
 
-    // Pure compare (no serialize overhead)
+    // Compare
     uint64_t match_count = 0;
     for (size_t i = 0; i < d.numKeys; i++) {
         const uint8_t* arenaPtr;
-        memcpy(&arenaPtr, reinterpret_cast<const char*>(sRows[i]) + sColOffset, sizeof(arenaPtr));
+        memcpy(&arenaPtr, reinterpret_cast<const char*>(rows[i]) + colOffset, sizeof(arenaPtr));
         if (!arenaPtr) continue;
         const uint8_t* pos = arenaPtr;
         bool all_match = true;
