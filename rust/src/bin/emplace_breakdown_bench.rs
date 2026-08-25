@@ -393,79 +393,48 @@ fn bench_serialize_key_noinline(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_compare_varchar(d: &TestData) -> u64 {
-    // Driven by emplace then batch compare (same as FULL pipeline)
+    // Setup: serialize numKeys rows (same scale as serialize bench)
     let key_sizes = vec![0usize; NUM_STR_COLS];
     let kinds = vec![ColumnKind::Varchar; NUM_STR_COLS];
     let mut rc = RowContainer::with_kinds(&key_sizes, &kinds, 8);
-    let mut table = TaperHashMap::with_capacity(d.num_chunks);
     let agg_offset = rc.agg_state_offset();
     let col_offset = rc.column_at(0).offset();
 
-    // First pass: serialize all keys into RowContainer via emplace
-    let mut groups: Vec<*const u8> = vec![std::ptr::null(); d.total_rows];
-    let num_batches = (d.total_rows + BATCH_SIZE - 1) / BATCH_SIZE;
-    for batch_idx in 0..num_batches {
-        let start = batch_idx * BATCH_SIZE;
-        let end = (start + BATCH_SIZE).min(d.total_rows);
-        let batch_hashes = &d.hashes[start..end];
-        let col_slices: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| unsafe { d.slices[c].as_ptr().add(start) }).collect();
-        let groups_ptr = groups.as_mut_ptr();
-        let rc_ptr = &mut rc as *mut RowContainer;
-
-        table.emplace_batch_full(
-            batch_hashes,
-            &|_: usize, _: &SlotValue| -> bool { true },
-            &mut |row_idx: usize, sv: &mut SlotValue| {
-                let rc = unsafe { &mut *rc_ptr };
-                let row = rc.new_row();
-                let mut total_size = 0usize;
-                for c in 0..NUM_STR_COLS {
-                    let s = unsafe { &*col_slices[c].add(row_idx) };
-                    total_size += 1 + compute_row_len_size(s.len) as usize + s.len;
-                }
-                let block = rc.arena_alloc(total_size);
-                let mut wp = block;
-                for c in 0..NUM_STR_COLS {
-                    let s = unsafe { &*col_slices[c].add(row_idx) };
-                    let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
-                    wp = unsafe { wp.add(written) };
-                }
-                unsafe { (row as *mut *const u8).write_unaligned(block as *const u8); }
-                RowContainer::store_value::<i64>(row, agg_offset, 0);
-                sv.set_ptr(row as *const u8);
-                unsafe { *groups_ptr.add(start + row_idx) = row as *const u8; }
-            },
-            &mut |row_idx: usize, sv: &SlotValue, _is_new: bool| {
-                unsafe { *groups_ptr.add(start + row_idx) = sv.get_ptr(); }
-            },
-        );
+    let mut rows: Vec<*const u8> = Vec::with_capacity(d.num_keys);
+    for i in 0..d.num_keys {
+        let row = rc.new_row();
+        let mut total_size = 0usize;
+        for c in 0..NUM_STR_COLS {
+            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
+        }
+        let block = rc.arena_alloc(total_size);
+        let mut wp = block;
+        for c in 0..NUM_STR_COLS {
+            let s = &d.slices[c][i];
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
+            wp = unsafe { wp.add(written) };
+        }
+        unsafe { (row as *mut *const u8).write_unaligned(block as *const u8); }
+        RowContainer::store_value::<i64>(row, agg_offset, 0);
+        rows.push(row as *const u8);
     }
 
-    // Second pass: compare all rows (batch-driven, same as FULL pipeline)
+    // Compare: each key row compared against its own input (always match)
     let mut match_count: u64 = 0;
-    for batch_idx in 0..num_batches {
-        let start = batch_idx * BATCH_SIZE;
-        let end = (start + BATCH_SIZE).min(d.total_rows);
-        let col_slices: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| unsafe { d.slices[c].as_ptr().add(start) }).collect();
-
-        for ri in 0..(end - start) {
-            let i = start + ri;
-            let grp = groups[i];
-            if grp.is_null() { continue; }
-            let arena_ptr: *const u8 = unsafe { (grp.add(col_offset) as *const *const u8).read_unaligned() };
-            if arena_ptr.is_null() { continue; }
-            let mut pos = arena_ptr;
-            let mut all_match = true;
-            for c in 0..NUM_STR_COLS {
-                let s = unsafe { &*col_slices[c].add(ri) };
-                if !compare_varchar_from_row(pos, unsafe { std::slice::from_raw_parts(s.ptr, s.len) }) {
-                    all_match = false; break;
-                }
-                let entry_size = compute_varchar_serialized_size(pos);
-                pos = unsafe { pos.add(entry_size) };
+    for i in 0..d.num_keys {
+        let arena_ptr: *const u8 = unsafe { (rows[i].add(col_offset) as *const *const u8).read_unaligned() };
+        if arena_ptr.is_null() { continue; }
+        let mut pos = arena_ptr;
+        let mut all_match = true;
+        for c in 0..NUM_STR_COLS {
+            let s = &d.slices[c][i];
+            if !compare_varchar_from_row(pos, unsafe { std::slice::from_raw_parts(s.ptr, s.len) }) {
+                all_match = false; break;
             }
-            if all_match { match_count += 1; }
+            let entry_size = compute_varchar_serialized_size(pos);
+            pos = unsafe { pos.add(entry_size) };
         }
+        if all_match { match_count += 1; }
     }
     match_count
 }
