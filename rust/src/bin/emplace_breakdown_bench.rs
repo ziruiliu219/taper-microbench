@@ -213,48 +213,29 @@ fn bench_compare_key_hash(d: &TestData) -> u64 {
 
 #[inline(never)]
 fn bench_serialize_key(d: &TestData) -> u64 {
-    // Driven by hash table emplace (same call pattern as FULL pipeline)
+    // Pure serialize with arena allocator (no emplace overhead)
     let key_sizes = vec![0usize; NUM_STR_COLS];
     let kinds = vec![ColumnKind::Varchar; NUM_STR_COLS];
     let mut rc = RowContainer::with_kinds(&key_sizes, &kinds, 8);
-    let mut table = TaperHashMap::with_capacity(d.num_chunks);
     let agg_offset = rc.agg_state_offset();
     let mut checksum: u64 = 0;
 
-    let num_batches = (d.total_rows + BATCH_SIZE - 1) / BATCH_SIZE;
-    for batch_idx in 0..num_batches {
-        let start = batch_idx * BATCH_SIZE;
-        let end = (start + BATCH_SIZE).min(d.total_rows);
-        let batch_hashes = &d.hashes[start..end];
-        // colSlices[c] → pointer to slice array for this batch
-        let col_slices: Vec<*const Slice> = (0..NUM_STR_COLS).map(|c| unsafe { d.slices[c].as_ptr().add(start) }).collect();
-
-        let rc_ptr = &mut rc as *mut RowContainer;
-        table.emplace_batch_full(
-            batch_hashes,
-            &|_: usize, _: &SlotValue| -> bool { true },
-            &mut |row_idx: usize, sv: &mut SlotValue| {
-                let rc = unsafe { &mut *rc_ptr };
-                let row = rc.new_row();
-                // StoreKeyOneRow — serialize 4 varchars (same as FULL pipeline on_init)
-                let mut total_size = 0usize;
-                for c in 0..NUM_STR_COLS {
-                    let s = unsafe { &*col_slices[c].add(row_idx) };
-                    total_size += 1 + compute_row_len_size(s.len) as usize + s.len;
-                }
-                let block = rc.arena_alloc(total_size);
-                let mut wp = block;
-                for c in 0..NUM_STR_COLS {
-                    let s = unsafe { &*col_slices[c].add(row_idx) };
-                    let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
-                    wp = unsafe { wp.add(written) };
-                }
-                unsafe { (row as *mut *const u8).write_unaligned(block as *const u8); }
-                RowContainer::store_value::<i64>(row, agg_offset, 0);
-                sv.set_ptr(row as *const u8);
-            },
-            &mut |_: usize, _: &SlotValue, is_new: bool| { if is_new { checksum += 1; } },
-        );
+    for i in 0..d.total_rows {
+        let row = rc.new_row();
+        let mut total_size = 0usize;
+        for c in 0..NUM_STR_COLS {
+            total_size += 1 + compute_row_len_size(d.slices[c][i].len) as usize + d.slices[c][i].len;
+        }
+        let block = rc.arena_alloc(total_size);
+        let mut wp = block;
+        for c in 0..NUM_STR_COLS {
+            let s = &d.slices[c][i];
+            let written = serialize_varchar_to_buffer(wp, unsafe { std::slice::from_raw_parts(s.ptr, s.len) });
+            wp = unsafe { wp.add(written) };
+        }
+        unsafe { (row as *mut *const u8).write_unaligned(block as *const u8); }
+        RowContainer::store_value::<i64>(row, agg_offset, 0);
+        checksum = checksum.wrapping_add(row as u64);
     }
     checksum
 }
