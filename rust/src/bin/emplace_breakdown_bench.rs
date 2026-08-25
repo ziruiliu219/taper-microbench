@@ -201,19 +201,6 @@ fn bench_compare_key_hash(d: &TestData) -> u64 {
 }
 
 #[inline(never)]
-fn bench_new_row(d: &TestData) -> u64 {
-    let ks = vec![0usize; 4];
-    let kinds = vec![ColumnKind::Varchar; 4];
-    let mut rc = RowContainer::with_kinds(&ks, &kinds, 8);
-    let mut checksum: u64 = 0;
-    for _ in 0..d.total_rows {
-        let row = rc.new_row();
-        checksum = checksum.wrapping_add(row as u64);
-    }
-    checksum
-}
-
-#[inline(never)]
 fn bench_serialize_key(d: &TestData) -> u64 {
     // Driven by hash table emplace (same call pattern as FULL pipeline)
     let key_sizes = vec![0usize; NUM_STR_COLS];
@@ -407,22 +394,6 @@ fn bench_serialize_key_noinline(d: &TestData) -> u64 {
             wp = unsafe { wp.add(written) };
         }
         checksum = checksum.wrapping_add(block as u64);
-    }
-    checksum
-}
-
-#[inline(never)]
-fn bench_store_value(d: &TestData) -> u64 {
-    let ks = vec![0usize; 4];
-    let kinds = vec![ColumnKind::Varchar; 4];
-    let mut rc = RowContainer::with_kinds(&ks, &kinds, 8);
-    let agg_offset = rc.agg_state_offset();
-    let mut rows: Vec<*mut u8> = Vec::with_capacity(d.total_rows);
-    for _ in 0..d.total_rows { rows.push(rc.new_row()); }
-    let mut checksum: u64 = 0;
-    for i in 0..d.total_rows {
-        RowContainer::store_value::<i64>(rows[i], agg_offset, d.values[i]);
-        checksum = checksum.wrapping_add(d.values[i] as u64);
     }
     checksum
 }
@@ -649,14 +620,12 @@ fn main() {
     if should_run("3") { bench("3. load_tags", bench_load_tags); }
     if should_run("4") { bench("4. match_tag_swar", bench_match_tag); }
     if should_run("5") { bench("5. compare_key_hash", bench_compare_key_hash); }
-    if should_run("6") { bench("6. new_row", bench_new_row); }
     if should_run("7") { bench("7. serialize_key_4col", bench_serialize_key); }
     if should_run("7") { bench("7a.serialize_prealloc", bench_serialize_prealloc); }
     if should_run("7") { bench("7b.memcpy_only", bench_memcpy_only); }
     if should_run("7") { bench("7c.memcpy_flat", bench_memcpy_flat); }
     if should_run("7") { bench("7e.memcpy_serialized", bench_memcpy_serialized); }
     if should_run("7") { bench("7d.serialize_noinline_memcpy", bench_serialize_key_noinline); }
-    if should_run("8") { bench("8. store_value_i64", bench_store_value); }
     if should_run("9") { bench("9. compare_varchar_4col", bench_compare_varchar); }
     if should_run("10") { bench("10. accumulate", bench_accumulate); }
     if should_run("F") || should_run("11") { bench("FULL: pipeline", bench_full_pipeline); }

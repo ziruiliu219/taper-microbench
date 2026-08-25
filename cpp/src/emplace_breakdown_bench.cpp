@@ -6,10 +6,8 @@
 ///   3. load_tags:           chunk->TagsU64()
 ///   4. match_tag:           PHBitMask::MatchTag (SWAR)
 ///   5. compare_key_hash:    chunk->keys[slot] == key (int64 compare)
-///   6. new_row:             RowContainer::NewRow()
-///   7. serialize_key:       StoreKeyOneRow (4 varchar → arena)
-///   8. store_value:         StoreValue<int64_t>
-///   9. compare_varchar:     CompareVarcharFromRow × 4 cols
+///   6. serialize_key:       StoreKeyOneRow (4 varchar → arena)
+///   7. compare_varchar:     CompareVarcharFromRow × 4 cols
 ///  10. accumulate:          agg += value
 ///  FULL: pipeline           Complete EmplaceTableWithDecode
 ///
@@ -252,21 +250,6 @@ static uint64_t BenchCompareKeyHash(const TestData& d) {
     return matchCount;
 }
 
-// 6. NewRow
-__attribute__((noinline))
-static uint64_t BenchNewRow(const TestData& d) {
-    taper::SimpleArenaAllocator pool;
-    std::vector<size_t> ks(4, 0);
-    std::vector<taper::ColumnKind> kinds(4, taper::ColumnKind::Varchar);
-    taper::RowContainer rc(ks, kinds, 8, pool);
-    uint64_t checksum = 0;
-    for (size_t i = 0; i < d.totalRows; i++) {
-        char* row = rc.NewRow();
-        checksum += reinterpret_cast<uint64_t>(row);
-    }
-    return checksum;
-}
-
 // 7. Serialize key (4 varchar) — driven by hash table emplace (same call pattern as FULL pipeline)
 __attribute__((noinline))
 static uint64_t BenchSerializeKey(const TestData& d) {
@@ -381,24 +364,6 @@ static uint64_t BenchMemcpyFlat(const TestData& d) {
         checksum += reinterpret_cast<uint64_t>(wp);
     }
     free(buf);
-    return checksum;
-}
-
-// 8. Store value
-__attribute__((noinline))
-static uint64_t BenchStoreValue(const TestData& d) {
-    taper::SimpleArenaAllocator pool;
-    std::vector<size_t> ks(4, 0);
-    std::vector<taper::ColumnKind> kinds(4, taper::ColumnKind::Varchar);
-    taper::RowContainer rc(ks, kinds, 8, pool);
-    std::vector<char*> rows(d.totalRows);
-    for (size_t i = 0; i < d.totalRows; i++) rows[i] = rc.NewRow();
-    int32_t aggOffset = rc.AggStateOffset();
-    uint64_t checksum = 0;
-    for (size_t i = 0; i < d.totalRows; i++) {
-        taper::RowContainer::StoreValue<int64_t>(rows[i], aggOffset, d.values[i]);
-        checksum += static_cast<uint64_t>(d.values[i]);
-    }
     return checksum;
 }
 
@@ -627,12 +592,10 @@ int main(int argc, char** argv) {
     if (shouldRun("3")) bench("3. load_tags", BenchLoadTags);
     if (shouldRun("4")) bench("4. match_tag_swar", BenchMatchTag);
     if (shouldRun("5")) bench("5. compare_key_hash", BenchCompareKeyHash);
-    if (shouldRun("6")) bench("6. new_row", BenchNewRow);
     if (shouldRun("7")) bench("7. serialize_key_4col", BenchSerializeKey);
     if (shouldRun("7")) bench("7a.serialize_prealloc", BenchSerializePrealloc);
     if (shouldRun("7")) bench("7b.memcpy_only", BenchMemcpyOnly);
     if (shouldRun("7")) bench("7c.memcpy_flat", BenchMemcpyFlat);
-    if (shouldRun("8")) bench("8. store_value_i64", BenchStoreValue);
     if (shouldRun("9")) bench("9. compare_varchar_4col", BenchCompareVarchar);
     if (shouldRun("10")) bench("10. accumulate", BenchAccumulate);
     if (shouldRun("FULL") || shouldRun("11")) bench("FULL: pipeline", BenchFullPipeline);
