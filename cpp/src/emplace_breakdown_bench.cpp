@@ -566,7 +566,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "totalRows=%zu, numKeys=%zu, numChunks=%zu\n\n", data.totalRows, data.numKeys, data.numChunks);
 
     auto bench = [&](const char* name, uint64_t(*fn)(const TestData&)) {
-        volatile uint64_t w = fn(data); (void)w;
+        // Warmup: 3 iterations to stabilize allocator (page faults, dirty cache)
+        for (int w = 0; w < 3; w++) { volatile uint64_t ww = fn(data); (void)ww; }
         auto t0 = Clock::now();
         volatile uint64_t checksum = 0;
         for (size_t i = 0; i < numIters; i++) checksum = fn(data);

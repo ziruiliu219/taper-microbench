@@ -597,7 +597,8 @@ fn main() {
     eprintln!("totalRows={}, numKeys={}, numChunks={}\n", data.total_rows, data.num_keys, data.num_chunks);
 
     let bench = |name: &str, f: fn(&TestData) -> u64| {
-        let _ = f(&data);
+        // Warmup: 3 iterations to stabilize allocator (page faults, dirty cache)
+        for _ in 0..3 { let _ = f(&data); }
         let t0 = Instant::now();
         let mut checksum: u64 = 0;
         for _ in 0..num_iters { checksum = f(&data); }
