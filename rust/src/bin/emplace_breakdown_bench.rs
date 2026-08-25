@@ -479,6 +479,7 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
 
     // Second pass: compare all rows (batch-driven, same as FULL pipeline)
     let mut match_count: u64 = 0;
+    let num_cols_cmp = std::hint::black_box(NUM_STR_COLS); // prevent unrolling
     for batch_idx in 0..num_batches {
         let start = batch_idx * BATCH_SIZE;
         let end = (start + BATCH_SIZE).min(d.total_rows);
@@ -492,7 +493,7 @@ fn bench_compare_varchar(d: &TestData) -> u64 {
             if arena_ptr.is_null() { continue; }
             let mut pos = arena_ptr;
             let mut all_match = true;
-            for c in 0..NUM_STR_COLS {
+            for c in 0..num_cols_cmp {
                 let s = unsafe { &*col_slices[c].add(ri) };
                 if !compare_varchar_from_row(pos, unsafe { std::slice::from_raw_parts(s.ptr, s.len) }) {
                     all_match = false; break;

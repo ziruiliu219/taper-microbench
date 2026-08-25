@@ -449,6 +449,7 @@ static uint64_t BenchCompareVarchar(const TestData& d) {
     }
 
     // ─── Timed: compare all rows (batch-driven, same as GetUnequalsNumWithDecode) ───
+    volatile size_t numColsCmp = NUM_STR_COLS; // prevent unrolling
     uint64_t match_count = 0;
     for (size_t batch = 0; batch < numBatches; batch++) {
         size_t start = batch * BATCH_SIZE;
@@ -464,7 +465,7 @@ static uint64_t BenchCompareVarchar(const TestData& d) {
             if (!arenaPtr) continue;
             const uint8_t* pos = arenaPtr;
             bool all_match = true;
-            for (size_t c = 0; c < NUM_STR_COLS; c++) {
+            for (size_t c = 0; c < numColsCmp; c++) {
                 if (!taper::CompareVarcharFromRow(pos, batchColSlices[c][ri].ptr, batchColSlices[c][ri].len)) {
                     all_match = false; break;
                 }
