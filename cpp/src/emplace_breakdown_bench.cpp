@@ -267,7 +267,8 @@ static uint64_t BenchSerializeKey(const TestData& d) {
     taper::RowContainer rc(keySizes, kinds, 8, pool);
 
     uint64_t checksum = 0;
-    for (size_t i = 0; i < d.totalRows; i++) {
+    // Only serialize numKeys rows (same as emplace version which only inits new keys)
+    for (size_t i = 0; i < d.numKeys; i++) {
         char* row = rc.NewRow();
         size_t totalSize = 0;
         for (size_t c = 0; c < NUM_STR_COLS; c++) {

@@ -220,7 +220,8 @@ fn bench_serialize_key(d: &TestData) -> u64 {
     let agg_offset = rc.agg_state_offset();
     let mut checksum: u64 = 0;
 
-    for i in 0..d.total_rows {
+    // Only serialize numKeys rows (same as emplace version which only inits new keys)
+    for i in 0..d.num_keys {
         let row = rc.new_row();
         let mut total_size = 0usize;
         for c in 0..NUM_STR_COLS {
