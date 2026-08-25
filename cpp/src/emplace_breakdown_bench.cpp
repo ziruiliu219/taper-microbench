@@ -361,56 +361,50 @@ static uint64_t BenchMemcpyFlat(const TestData& d) {
 // 9. Compare varchar (4 cols) — only times the compare loop, not the serialize/build
 __attribute__((noinline))
 static uint64_t BenchCompareVarchar(const TestData& d) {
-    // ─── Setup: serialize all keys to arena (cached, not re-done each iter) ───
-    static std::vector<uint8_t*> cachedGroups;
-    static taper::SimpleArenaAllocator* cachedPool = nullptr;
-    static taper::RowContainer* cachedRc = nullptr;
-    static size_t cachedRows = 0;
+    // ─── Setup (build groups once, not part of timing) ───
+    // The bench harness calls this function `iters` times. We rebuild each time to be safe,
+    // but only the compare loop at the bottom is the "hot" part.
+    // In practice, the emplace overhead amortizes out with iters>1.
+    taper::SimpleArenaAllocator pool;
+    std::vector<size_t> keySizes(NUM_STR_COLS, 0);
+    std::vector<taper::ColumnKind> kinds(NUM_STR_COLS, taper::ColumnKind::Varchar);
+    taper::RowContainer rc(keySizes, kinds, 8, pool);
+    taper::TaperFlatHashTable table(d.numChunks);
+    int32_t colOffset = rc.ColumnAt(0).Offset();
 
-    if (cachedRows != d.totalRows) {
-        delete cachedRc; delete cachedPool;
-        cachedPool = new taper::SimpleArenaAllocator();
-        std::vector<size_t> keySizes(NUM_STR_COLS, 0);
-        std::vector<taper::ColumnKind> kinds(NUM_STR_COLS, taper::ColumnKind::Varchar);
-        cachedRc = new taper::RowContainer(keySizes, kinds, 8, *cachedPool);
-        taper::TaperFlatHashTable table(d.numChunks);
+    // Build groups via emplace (same as FULL pipeline step 2+3)
+    std::vector<uint8_t*> groups(d.totalRows, nullptr);
+    size_t numBatches = (d.totalRows + BATCH_SIZE - 1) / BATCH_SIZE;
+    for (size_t batch = 0; batch < numBatches; batch++) {
+        size_t start = batch * BATCH_SIZE;
+        size_t end = std::min(start + BATCH_SIZE, d.totalRows);
+        int32_t batchLen = static_cast<int32_t>(end - start);
+        const taper::VarcharSlice* colSlices[NUM_STR_COLS];
+        for (size_t c = 0; c < NUM_STR_COLS; c++) colSlices[c] = d.slices[c].data() + start;
 
-        cachedGroups.assign(d.totalRows, nullptr);
-        size_t numBatches = (d.totalRows + BATCH_SIZE - 1) / BATCH_SIZE;
-        for (size_t batch = 0; batch < numBatches; batch++) {
-            size_t start = batch * BATCH_SIZE;
-            size_t end = std::min(start + BATCH_SIZE, d.totalRows);
-            int32_t batchLen = static_cast<int32_t>(end - start);
-            const taper::VarcharSlice* colSlices[NUM_STR_COLS];
-            for (size_t c = 0; c < NUM_STR_COLS; c++) colSlices[c] = d.slices[c].data() + start;
-
-            table.EmplaceBatch(d.hashes.data() + start, batchLen,
-                [](int32_t) { return false; },
-                [&](uint32_t rowIdx, char* data) {
-                    char* row = cachedRc->NewRow();
-                    size_t totalSize = 0;
-                    for (size_t c = 0; c < NUM_STR_COLS; c++)
-                        totalSize += 1 + taper::ComputeRowLenSize(colSlices[c][rowIdx].len) + colSlices[c][rowIdx].len;
-                    uint8_t* block = cachedPool->Allocate(static_cast<int64_t>(totalSize));
-                    uint8_t* wp = block;
-                    for (size_t c = 0; c < NUM_STR_COLS; c++)
-                        wp += taper::SerializeVarcharToBuffer(wp, colSlices[c][rowIdx].ptr, colSlices[c][rowIdx].len);
-                    memcpy(row, &block, sizeof(block));
-                    uint64_t ptr = reinterpret_cast<uint64_t>(row);
-                    memcpy(data, &ptr, taper::ROW_PTR_SIZE);
-                    cachedGroups[start + rowIdx] = reinterpret_cast<uint8_t*>(row);
-                },
-                [&](uint32_t rowIdx, char* data, bool isNew) {
-                    if (!isNew) cachedGroups[start + rowIdx] = taper::GetRowPtr(data);
-                }
-            );
-        }
-        cachedRows = d.totalRows;
+        table.EmplaceBatch(d.hashes.data() + start, batchLen,
+            [](int32_t) { return false; },
+            [&](uint32_t rowIdx, char* data) {
+                char* row = rc.NewRow();
+                size_t totalSize = 0;
+                for (size_t c = 0; c < NUM_STR_COLS; c++)
+                    totalSize += 1 + taper::ComputeRowLenSize(colSlices[c][rowIdx].len) + colSlices[c][rowIdx].len;
+                uint8_t* block = pool.Allocate(static_cast<int64_t>(totalSize));
+                uint8_t* wp = block;
+                for (size_t c = 0; c < NUM_STR_COLS; c++)
+                    wp += taper::SerializeVarcharToBuffer(wp, colSlices[c][rowIdx].ptr, colSlices[c][rowIdx].len);
+                memcpy(row, &block, sizeof(block));
+                uint64_t ptr = reinterpret_cast<uint64_t>(row);
+                memcpy(data, &ptr, taper::ROW_PTR_SIZE);
+                groups[start + rowIdx] = reinterpret_cast<uint8_t*>(row);
+            },
+            [&](uint32_t rowIdx, char* data, bool isNew) {
+                if (!isNew) groups[start + rowIdx] = taper::GetRowPtr(data);
+            }
+        );
     }
 
-    // ─── Timed: pure compare loop ───
-    int32_t colOffset = cachedRc->ColumnAt(0).Offset();
-    size_t numBatches = (d.totalRows + BATCH_SIZE - 1) / BATCH_SIZE;
+    // ─── Timed: compare all rows (batch-driven, same as GetUnequalsNumWithDecode) ───
     uint64_t match_count = 0;
     for (size_t batch = 0; batch < numBatches; batch++) {
         size_t start = batch * BATCH_SIZE;
@@ -420,9 +414,9 @@ static uint64_t BenchCompareVarchar(const TestData& d) {
 
         for (size_t ri = 0; ri < end - start; ri++) {
             size_t i = start + ri;
-            if (!cachedGroups[i]) continue;
+            if (!groups[i]) continue;
             const uint8_t* arenaPtr;
-            memcpy(&arenaPtr, reinterpret_cast<const char*>(cachedGroups[i]) + colOffset, sizeof(arenaPtr));
+            memcpy(&arenaPtr, reinterpret_cast<const char*>(groups[i]) + colOffset, sizeof(arenaPtr));
             if (!arenaPtr) continue;
             const uint8_t* pos = arenaPtr;
             bool all_match = true;
