@@ -22,6 +22,7 @@
 #include <string>
 #include <numeric>
 #include <algorithm>
+#include <memory>
 #include <random>
 
 #define XXH_INLINE_ALL
@@ -181,7 +182,14 @@ static TestData GenData(double sel) {
 // 1. Hash & position (creates real hashmap, uses BenchHash + BenchGetChunkPos)
 __attribute__((noinline))
 static uint64_t BenchHashAndPosition(const TestData& d) {
-    taper::TaperFlatHashTable table(d.numChunks);
+    // Create table once (static), avoid repeated mmap/munmap on large HT.
+    static std::unique_ptr<taper::TaperFlatHashTable> cached;
+    static size_t cachedChunks = 0;
+    if (cachedChunks != d.numChunks) {
+        cached = std::make_unique<taper::TaperFlatHashTable>(d.numChunks);
+        cachedChunks = d.numChunks;
+    }
+    auto& table = *cached;
     uint64_t checksum = 0;
     for (size_t i = 0; i < d.totalRows; i++) {
         uint64_t hv = table.BenchHash(d.hashes[i]);

@@ -132,14 +132,25 @@ fn gen_data(sel: f64, ht_size: usize) -> TestData {
 
 #[inline(never)]
 fn bench_hash_and_position(d: &TestData) -> u64 {
-    let table = TaperHashMap::with_capacity(d.num_chunks);
-    let mut checksum: u64 = 0;
-    for i in 0..d.total_rows {
-        let hv = TaperHashMap::bench_hash(d.hashes[i]);
-        let pos = table.bench_chunk_pos(hv);
-        checksum = checksum.wrapping_add(pos as u64);
+    // Cache table in thread_local to avoid repeated mmap/munmap on large HT.
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHED: RefCell<Option<(usize, TaperHashMap)>> = RefCell::new(None);
     }
-    checksum
+    CACHED.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if borrow.as_ref().map_or(true, |(n, _)| *n != d.num_chunks) {
+            *borrow = Some((d.num_chunks, TaperHashMap::with_capacity(d.num_chunks)));
+        }
+        let table = &borrow.as_ref().unwrap().1;
+        let mut checksum: u64 = 0;
+        for i in 0..d.total_rows {
+            let hv = TaperHashMap::bench_hash(d.hashes[i]);
+            let pos = table.bench_chunk_pos(hv);
+            checksum = checksum.wrapping_add(pos as u64);
+        }
+        checksum
+    })
 }
 
 #[inline(never)]
