@@ -129,25 +129,50 @@ fn gen_data(sel: f64, ht_size: usize) -> TestData {
     }
 
     // Pre-serialize all rows for compare-only bench (not timed)
-    let mut arena_buf: Vec<u8> = Vec::with_capacity(total_rows * 80);
+    // Uses SimpleArenaAllocator (same as C++ / OmniOperator) — NOT contiguous Vec
+    struct CompareArena {
+        chunks: Vec<(*mut u8, usize)>,
+        buf: *mut u8,
+        avail: usize,
+    }
+    impl CompareArena {
+        fn new() -> Self { CompareArena { chunks: Vec::new(), buf: std::ptr::null_mut(), avail: 0 } }
+        fn allocate(&mut self, size: usize) -> *mut u8 {
+            if self.avail < size {
+                let chunk_size = size.max(if self.chunks.is_empty() { 4096 } else {
+                    let last = self.chunks.last().unwrap().1;
+                    if last < 512*1024 { last * 2 } else { ((size + 512*1024 - 1) / (512*1024)) * 512*1024 }
+                });
+                let ptr = unsafe { libc::malloc(chunk_size) as *mut u8 };
+                self.chunks.push((ptr, chunk_size));
+                self.buf = ptr; self.avail = chunk_size;
+            }
+            let ret = self.buf;
+            self.buf = unsafe { self.buf.add(size) };
+            self.avail -= size;
+            ret
+        }
+    }
+    let mut compare_arena = CompareArena::new();
     let mut compare_blocks: Vec<*const u8> = Vec::with_capacity(total_rows);
     for i in 0..total_rows {
         let mut total_size = 0usize;
         for c in 0..NUM_STR_COLS {
             total_size += 1 + compute_row_len_size(slices[c][i].len) as usize + slices[c][i].len;
         }
-        let offset = arena_buf.len();
-        arena_buf.resize(offset + total_size, 0);
-        let mut wp = unsafe { arena_buf.as_mut_ptr().add(offset) };
+        let block = compare_arena.allocate(total_size);
+        let mut wp = block;
         for c in 0..NUM_STR_COLS {
             let data = unsafe { std::slice::from_raw_parts(slices[c][i].ptr, slices[c][i].len) };
             let written = serialize_varchar_to_buffer(wp, data);
             wp = unsafe { wp.add(written) };
         }
-        compare_blocks.push(unsafe { arena_buf.as_ptr().add(offset) });
+        compare_blocks.push(block as *const u8);
     }
+    // Leak the arena so compare_blocks remain valid (freed on process exit)
+    std::mem::forget(compare_arena);
 
-    TestData { str_cols, slices, flat_slices, hashes: all_hashes, values, total_rows, num_keys, num_chunks, compare_blocks, _compare_arena_buf: arena_buf }
+    TestData { str_cols, slices, flat_slices, hashes: all_hashes, values, total_rows, num_keys, num_chunks, compare_blocks, _compare_arena_buf: Vec::new() }
 }
 
 // ─── Steps ───────────────────────────────────────────────────────
