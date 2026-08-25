@@ -120,13 +120,9 @@ pub fn compute_varchar_serialized_size(data: *const u8) -> usize {
 /// Compare varchar stored in arena format against input bytes. Returns true if equal.
 /// Mirrors C++ `TaperColumnSerializeHandler::CompareVarcharFromRow`:
 ///   return memcmp(rowDataPtr, sv.data(), stringLen) == 0;
-/// Forces real memcmp@plt call (prevents LLVM from optimizing to bcmp).
+/// Uses real memcmp (not bcmp) to match C++ exactly.
 #[inline]
 pub fn compare_varchar_from_row(arena_ptr: *const u8, input: &[u8]) -> bool {
-    // Use function pointer to prevent LLVM from recognizing memcmp == 0 → bcmp optimization
-    let memcmp_fn: unsafe extern "C" fn(*const libc::c_void, *const libc::c_void, usize) -> i32 = libc::memcmp;
-    let memcmp_ptr = std::hint::black_box(memcmp_fn);
-
     unsafe {
         let row_len_size = *arena_ptr;
         let string_len: usize = match row_len_size {
@@ -138,12 +134,15 @@ pub fn compare_varchar_from_row(arena_ptr: *const u8, input: &[u8]) -> bool {
         if string_len != input.len() { return false; }
         if string_len == 0 { return true; }
         let data_ptr = arena_ptr.add(1 + row_len_size as usize);
-        memcmp_ptr(
-            data_ptr as *const libc::c_void,
-            input.as_ptr() as *const libc::c_void,
-            string_len,
-        ) == 0
+        real_memcmp(data_ptr, input.as_ptr(), string_len) == 0
     }
+}
+
+/// Force real memcmp PLT call — prevents LLVM from converting to bcmp.
+/// #[inline(never)] ensures this is a real function call through PLT.
+#[inline(never)]
+fn real_memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    unsafe { libc::memcmp(a as *const libc::c_void, b as *const libc::c_void, n) }
 }
 
 /// Read varchar pointer from a row. Mirrors C++ `*reinterpret_cast<char**>(row + offset)`.
